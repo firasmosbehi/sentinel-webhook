@@ -2,5 +2,4 @@
 
 ## Maintainer
 
-- Firas Mosbahi (@firasmosbehi)
-
+- @firasmosbehi
