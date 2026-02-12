@@ -1,0 +1,34 @@
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+out/
+coverage/
+
+# Env / secrets
+.env
+.env.*
+
+# Apify local storage (when running the Actor locally)
+apify_storage/
+storage/
+
+# Tooling caches
+.cache/
+.turbo/
+.eslintcache
+.parcel-cache/
+.next/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
