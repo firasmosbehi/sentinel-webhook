@@ -1,0 +1,95 @@
+{
+  "title": "Sentinel Webhook",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "target_url": {
+      "title": "Target URL",
+      "type": "string",
+      "description": "The URL to monitor for changes.",
+      "editor": "textfield"
+    },
+    "selector": {
+      "title": "CSS selector (optional)",
+      "type": "string",
+      "description": "Optional CSS selector to watch only a specific part of the page (e.g. .price, #stock-count).",
+      "editor": "textfield"
+    },
+    "webhook_url": {
+      "title": "Webhook URL",
+      "type": "string",
+      "description": "Callback URL to POST change events to.",
+      "editor": "textfield"
+    },
+    "webhook_headers": {
+      "title": "Webhook headers (optional)",
+      "type": "object",
+      "description": "Extra headers to include in the webhook request.",
+      "editor": "json"
+    },
+    "webhook_secret": {
+      "title": "Webhook secret (optional)",
+      "type": "string",
+      "description": "If set, the payload will be signed and sent with an X-Sentinel-Signature header.",
+      "editor": "textfield",
+      "isSecret": true
+    },
+    "baseline_mode": {
+      "title": "Baseline behavior",
+      "type": "string",
+      "description": "What to do on the first run when no previous snapshot exists.",
+      "editor": "select",
+      "default": "store_only",
+      "enum": ["store_only", "notify"]
+    },
+    "state_store_name": {
+      "title": "State store name",
+      "type": "string",
+      "description": "Key-Value Store name used to persist previous snapshots across runs.",
+      "editor": "textfield",
+      "default": "sentinel-state"
+    },
+    "timeout_secs": {
+      "title": "Timeout (seconds)",
+      "type": "integer",
+      "description": "Timeout applied to page fetches and webhook delivery.",
+      "default": 30,
+      "minimum": 1
+    },
+    "max_retries": {
+      "title": "Max retries",
+      "type": "integer",
+      "description": "Retries for transient failures (network errors, 5xx, 429).",
+      "default": 3,
+      "minimum": 0
+    },
+    "retry_backoff_ms": {
+      "title": "Retry backoff (ms)",
+      "type": "integer",
+      "description": "Base backoff used between retries (exponential).",
+      "default": 1000,
+      "minimum": 0
+    },
+    "ignore_selectors": {
+      "title": "Ignore selectors (optional)",
+      "type": "array",
+      "description": "CSS selectors to remove before extracting content (noise reduction).",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "ignore_regexes": {
+      "title": "Ignore regexes (optional)",
+      "type": "array",
+      "description": "Regex patterns to scrub from extracted text (e.g. timestamps, tokens). Supports either plain patterns or /pattern/flags.",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "debug": {
+      "title": "Debug logging",
+      "type": "boolean",
+      "description": "Enable verbose logging.",
+      "default": false
+    }
+  },
+  "required": ["target_url", "webhook_url"]
+}

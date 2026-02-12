@@ -1,0 +1,11 @@
+{
+  "actorSpecification": 1,
+  "name": "sentinel-webhook",
+  "title": "Sentinel Webhook",
+  "description": "Turn any static URL into a developer-friendly webhook (change detection).",
+  "version": "0.1.0",
+  "meta": {
+    "templateId": "typescript-actor"
+  }
+}
+

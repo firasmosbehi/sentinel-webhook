@@ -31,8 +31,19 @@ simple "URL in, webhook out" change-detection bridge.
 
 ## Status
 
-Repository scaffold only. Implementation will target an Apify Actor with
-stateful diffing via the Key-Value Store.
+MVP implementation in progress (Apify Actor + stateful diffing via Key-Value Store).
+
+## Local Development
+
+```bash
+npm install
+cp INPUT.example.json INPUT.json
+npm run dev
+```
+
+Notes:
+- State is persisted across runs in a named Key-Value Store (`state_store_name`, default `sentinel-state`).
+- If you're not using `INPUT.json`, you can set `SENTINEL_INPUT` to a JSON string.
 
 ## Contributing
 
@@ -41,4 +52,3 @@ See `CONTRIBUTING.md`.
 ## License
 
 MIT (see `LICENSE`).
-
