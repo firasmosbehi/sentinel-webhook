@@ -56,26 +56,103 @@
       "editor": "textfield",
       "default": "sentinel-dead-letter"
     },
+    "history_dataset_name": {
+      "title": "History dataset name",
+      "type": "string",
+      "description": "Dataset name where change history events can be stored.",
+      "editor": "textfield",
+      "default": "sentinel-history"
+    },
+    "history_mode": {
+      "title": "History mode",
+      "type": "string",
+      "description": "What to store in the history dataset.",
+      "editor": "select",
+      "default": "changes_only",
+      "enum": ["none", "changes_only", "all_events"]
+    },
     "timeout_secs": {
       "title": "Timeout (seconds)",
       "type": "integer",
-      "description": "Timeout applied to page fetches and webhook delivery.",
+      "description": "Legacy shared timeout applied to page fetches and webhook delivery (prefer fetch_timeout_secs / webhook_timeout_secs).",
       "default": 30,
       "minimum": 1
     },
     "max_retries": {
       "title": "Max retries",
       "type": "integer",
-      "description": "Retries for transient failures (network errors, 5xx, 429).",
+      "description": "Legacy shared retries (prefer fetch_max_retries / webhook_max_retries).",
       "default": 3,
       "minimum": 0
     },
     "retry_backoff_ms": {
       "title": "Retry backoff (ms)",
       "type": "integer",
-      "description": "Base backoff used between retries (exponential).",
+      "description": "Legacy shared backoff (prefer fetch_retry_backoff_ms / webhook_retry_backoff_ms).",
       "default": 1000,
       "minimum": 0
+    },
+    "fetch_timeout_secs": {
+      "title": "Fetch timeout (seconds)",
+      "type": "integer",
+      "description": "Timeout applied to fetching the target URL.",
+      "default": 30,
+      "minimum": 1
+    },
+    "fetch_max_retries": {
+      "title": "Fetch max retries",
+      "type": "integer",
+      "description": "Retries for transient fetch failures (network errors, 5xx, 429).",
+      "default": 3,
+      "minimum": 0
+    },
+    "fetch_retry_backoff_ms": {
+      "title": "Fetch retry backoff (ms)",
+      "type": "integer",
+      "description": "Base backoff used between fetch retries (exponential).",
+      "default": 1000,
+      "minimum": 0
+    },
+    "webhook_timeout_secs": {
+      "title": "Webhook timeout (seconds)",
+      "type": "integer",
+      "description": "Timeout applied to webhook delivery.",
+      "default": 30,
+      "minimum": 1
+    },
+    "webhook_max_retries": {
+      "title": "Webhook max retries",
+      "type": "integer",
+      "description": "Retries for transient webhook failures (timeouts, 5xx, 429).",
+      "default": 3,
+      "minimum": 0
+    },
+    "webhook_retry_backoff_ms": {
+      "title": "Webhook retry backoff (ms)",
+      "type": "integer",
+      "description": "Base backoff used between webhook retries (exponential).",
+      "default": 1000,
+      "minimum": 0
+    },
+    "webhook_retry_on_statuses": {
+      "title": "Webhook retry status codes",
+      "type": "array",
+      "description": "HTTP status codes that should be retried for webhook delivery (in addition to 5xx if enabled).",
+      "editor": "stringList",
+      "items": { "type": "integer" },
+      "default": [429]
+    },
+    "webhook_retry_on_5xx": {
+      "title": "Retry webhook on 5xx",
+      "type": "boolean",
+      "description": "If enabled, webhook delivery retries on any 5xx response.",
+      "default": true
+    },
+    "webhook_max_retry_time_secs": {
+      "title": "Webhook max retry time (seconds)",
+      "type": "number",
+      "description": "Optional maximum total time (including backoff delays) spent retrying webhook delivery. Leave empty for no limit.",
+      "editor": "textfield"
     },
     "max_redirects": {
       "title": "Max redirects",
@@ -90,6 +167,19 @@
       "description": "Maximum number of bytes to download from the target response body.",
       "default": 2000000,
       "minimum": 1
+    },
+    "max_payload_bytes": {
+      "title": "Max payload bytes",
+      "type": "integer",
+      "description": "Maximum webhook payload size in bytes. If exceeded, the old/new text values are truncated before sending.",
+      "default": 250000,
+      "minimum": 1024
+    },
+    "reset_baseline": {
+      "title": "Reset baseline",
+      "type": "boolean",
+      "description": "Force storing a new baseline snapshot, even if one already exists.",
+      "default": false
     },
     "ignore_selectors": {
       "title": "Ignore selectors (optional)",

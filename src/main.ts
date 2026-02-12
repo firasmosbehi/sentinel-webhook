@@ -8,6 +8,8 @@ import { makeStateKey } from './state.js';
 import { sendWebhook, WebhookDeliveryError } from './webhook.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { redactText, redactUrl, truncate } from './redact.js';
+import { computeEventId } from './event_id.js';
+import { limitPayloadBytes } from './payload_limit.js';
 import type { ChangePayload, Snapshot } from './types.js';
 
 function toError(err: unknown): Error {
@@ -85,7 +87,37 @@ await Actor.main(async () => {
   const kv = await Actor.openKeyValueStore(input.state_store_name);
   const stateKey = makeStateKey(input.target_url, input.selector);
 
-  const previous = (await kv.getValue<Snapshot>(stateKey)) ?? null;
+  const storedPrevious = (await kv.getValue<Snapshot>(stateKey)) ?? null;
+  const previous = input.reset_baseline ? null : storedPrevious;
+
+  const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
+
+  async function pushHistory(item: Record<string, unknown>): Promise<void> {
+    if (!history) return;
+    if (input.history_mode === 'changes_only' && item.event !== 'CHANGE_DETECTED') return;
+    await history.pushData(item);
+  }
+
+  if (input.reset_baseline && storedPrevious) {
+    log.info('Reset baseline requested; ignoring existing baseline.', { stateKey, contentHash: storedPrevious.contentHash });
+    await Actor.pushData({
+      event: 'BASELINE_RESET',
+      url: safeUrl(input.target_url, input.redact_logs),
+      selector: input.selector,
+      timestamp: new Date().toISOString(),
+      stateKey,
+      previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
+    });
+
+    await pushHistory({
+      event: 'BASELINE_RESET',
+      timestamp: new Date().toISOString(),
+      stateKey,
+      url: safeUrl(input.target_url, input.redact_logs),
+      selector: input.selector,
+      previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
+    });
+  }
 
   let current: Snapshot;
   try {
@@ -99,6 +131,16 @@ await Actor.main(async () => {
       timestamp: new Date().toISOString(),
       stateKey,
     });
+
+    if (input.history_mode === 'all_events') {
+      await pushHistory({
+        event: 'FETCH_FAILED',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+      });
+    }
     return;
   }
 
@@ -106,14 +148,22 @@ await Actor.main(async () => {
     await kv.setValue(stateKey, current);
     log.info('Baseline stored (no previous snapshot).', { stateKey, contentHash: current.contentHash });
 
-    const payload: ChangePayload = {
+    const payloadBase: ChangePayload = {
       schema_version: 1,
+      event_id: computeEventId({
+        event: 'BASELINE_STORED',
+        url: input.target_url,
+        selector: input.selector,
+        currentHash: current.contentHash,
+      }),
       event: 'BASELINE_STORED',
       url: input.target_url,
       selector: input.selector,
       timestamp: new Date().toISOString(),
       current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
     };
+
+    const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
 
     await Actor.pushData({
       ...payload,
@@ -125,6 +175,19 @@ await Actor.main(async () => {
       try {
         const delivery = await sendWebhook(input, payload);
         log.info('Baseline webhook sent.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+
+        await pushHistory({
+          event: 'BASELINE_STORED',
+          timestamp: payload.timestamp,
+          event_id: payload.event_id,
+          stateKey,
+          url: safeUrl(payload.url, input.redact_logs),
+          selector: payload.selector,
+          payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+          delivered: true,
+          delivery,
+        });
       } catch (err) {
         const safeErr = toSafeError(err, input.redact_logs);
         const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
@@ -156,7 +219,33 @@ await Actor.main(async () => {
           dead_letter_dataset_name: input.dead_letter_dataset_name,
           error: safeErr,
         });
+
+        await pushHistory({
+          event: 'BASELINE_STORED',
+          timestamp: payload.timestamp,
+          event_id: payload.event_id,
+          stateKey,
+          url: safeUrl(payload.url, input.redact_logs),
+          selector: payload.selector,
+          payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+          delivered: false,
+          error: safeErr,
+        });
       }
+    } else if (input.history_mode === 'all_events') {
+      await pushHistory({
+        event: 'BASELINE_STORED',
+        timestamp: payload.timestamp,
+        event_id: payload.event_id,
+        stateKey,
+        url: safeUrl(payload.url, input.redact_logs),
+        selector: payload.selector,
+        payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        delivered: false,
+        webhook_skipped: true,
+      });
     }
 
     return;
@@ -175,13 +264,32 @@ await Actor.main(async () => {
       stateKey,
     });
 
+    if (input.history_mode === 'all_events') {
+      await pushHistory({
+        event: 'NO_CHANGE',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+      });
+    }
+
     // Refresh baseline metadata (timestamps/headers) even if content is unchanged.
     await kv.setValue(stateKey, current);
     return;
   }
 
-  const payload: ChangePayload = {
+  const payloadBase: ChangePayload = {
     schema_version: 1,
+    event_id: computeEventId({
+      event: 'CHANGE_DETECTED',
+      url: input.target_url,
+      selector: input.selector,
+      previousHash: previous.contentHash,
+      currentHash: current.contentHash,
+    }),
     event: 'CHANGE_DETECTED',
     url: input.target_url,
     selector: input.selector,
@@ -191,9 +299,24 @@ await Actor.main(async () => {
     current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
   };
 
+  const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+
   try {
     const delivery = await sendWebhook(input, payload);
     log.info('Change detected; webhook delivered.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+
+    await pushHistory({
+      event: 'CHANGE_DETECTED',
+      timestamp: payload.timestamp,
+      event_id: payload.event_id,
+      stateKey,
+      url: safeUrl(payload.url, input.redact_logs),
+      selector: payload.selector,
+      payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+      delivered: true,
+      delivery,
+    });
   } catch (err) {
     const safeErr = toSafeError(err, input.redact_logs);
     const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
@@ -223,6 +346,19 @@ await Actor.main(async () => {
     log.error('Change detected but webhook delivery failed. Baseline NOT updated (will retry next run).', {
       webhook_url: safeUrl(input.webhook_url, input.redact_logs),
       dead_letter_dataset_name: input.dead_letter_dataset_name,
+      error: safeErr,
+    });
+
+    await pushHistory({
+      event: 'CHANGE_DETECTED',
+      timestamp: payload.timestamp,
+      event_id: payload.event_id,
+      stateKey,
+      url: safeUrl(payload.url, input.redact_logs),
+      selector: payload.selector,
+      payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+      delivered: false,
       error: safeErr,
     });
 

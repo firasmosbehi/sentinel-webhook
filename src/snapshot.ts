@@ -34,9 +34,9 @@ const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 
 export async function buildSnapshot(input: SentinelInput): Promise<Snapshot> {
   const {
-    max_retries,
-    retry_backoff_ms,
-    timeout_secs,
+    fetch_max_retries,
+    fetch_retry_backoff_ms,
+    fetch_timeout_secs,
     target_url,
     selector,
     ignore_selectors,
@@ -52,7 +52,7 @@ export async function buildSnapshot(input: SentinelInput): Promise<Snapshot> {
         await assertSafeHttpUrl(currentUrl, 'target_url');
 
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), timeout_secs * 1000);
+        const timeout = setTimeout(() => controller.abort(), fetch_timeout_secs * 1000);
         try {
           const res = await fetch(currentUrl, {
             method: 'GET',
@@ -87,8 +87,8 @@ export async function buildSnapshot(input: SentinelInput): Promise<Snapshot> {
       throw new Error('Too many redirects');
     },
     {
-      maxRetries: max_retries,
-      baseBackoffMs: retry_backoff_ms,
+      maxRetries: fetch_max_retries,
+      baseBackoffMs: fetch_retry_backoff_ms,
       shouldRetry: isRetryableFetchError,
     },
   );

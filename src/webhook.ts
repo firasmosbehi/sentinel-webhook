@@ -16,9 +16,8 @@ export class WebhookDeliveryError extends Error {
 }
 
 function isRetryableWebhookError(err: unknown): boolean {
-  if (err instanceof WebhookDeliveryError && typeof err.statusCode === 'number') {
-    return err.statusCode === 429 || (err.statusCode >= 500 && err.statusCode <= 599);
-  }
+  // Status-code based decisions are handled via a closure in sendWebhook so we can
+  // apply user-provided retry policy.
   if (err instanceof TypeError) return true;
   if (err instanceof Error && err.name === 'AbortError') return true;
   return false;
@@ -71,22 +70,39 @@ export async function sendWebhook(input: SentinelInput, payload: ChangePayload):
   const headers: Record<string, string> = {
     'content-type': 'application/json; charset=utf-8',
     ...input.webhook_headers,
+    'x-sentinel-event-id': payload.event_id,
+    'idempotency-key': payload.event_id,
   };
 
   if (input.webhook_secret) {
     headers['x-sentinel-signature'] = `sha256=${hmacSha256Hex(input.webhook_secret, json)}`;
   }
 
+  const retryStatusSet = new Set(input.webhook_retry_on_statuses);
+
+  function shouldRetry(err: unknown): boolean {
+    if (err instanceof WebhookDeliveryError && typeof err.statusCode === 'number') {
+      if (retryStatusSet.has(err.statusCode)) return true;
+      if (input.webhook_retry_on_5xx && err.statusCode >= 500 && err.statusCode <= 599) return true;
+      return false;
+    }
+    return isRetryableWebhookError(err);
+  }
+
   let attempts = 0;
   await withRetries(
     async (attempt) => {
       attempts = attempt + 1;
-      return postJson(input.webhook_url, json, headers, input.timeout_secs, input.redact_logs);
+      return postJson(input.webhook_url, json, headers, input.webhook_timeout_secs, input.redact_logs);
     },
     {
-      maxRetries: input.max_retries,
-      baseBackoffMs: input.retry_backoff_ms,
-      shouldRetry: isRetryableWebhookError,
+      maxRetries: input.webhook_max_retries,
+      baseBackoffMs: input.webhook_retry_backoff_ms,
+      maxTotalTimeMs:
+        typeof input.webhook_max_retry_time_secs === 'number'
+          ? Math.floor(input.webhook_max_retry_time_secs * 1000)
+          : undefined,
+      shouldRetry,
     },
   );
 

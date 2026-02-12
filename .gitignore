@@ -19,6 +19,7 @@ INPUT.json
 # Apify local storage (when running the Actor locally)
 apify_storage/
 storage/
+apify_storage_test/
 
 # Tooling caches
 .cache/
