@@ -1,6 +1,8 @@
 import { withRetries } from './retry.js';
 import { sha256Hex } from './hash.js';
 import { normalizeHtmlToSnapshot } from './normalize.js';
+import { readResponseTextWithLimit } from './http.js';
+import { assertSafeHttpUrl } from './url_safety.js';
 import type { SentinelInput, Snapshot } from './types.js';
 
 export class HttpError extends Error {
@@ -28,39 +30,61 @@ function isRetryableFetchError(err: unknown): boolean {
   return false;
 }
 
-async function fetchText(url: string, timeoutSecs: number): Promise<{ status: number; headers: Headers; text: string }> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutSecs * 1000);
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        // A clear UA tends to reduce bot-blocking ambiguity.
-        'user-agent': 'SentinelWebhook/0.1 (+https://github.com/firasmosbehi/sentinel-webhook)',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-    });
-
-    const text = await res.text();
-    return { status: res.status, headers: res.headers, text };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 
 export async function buildSnapshot(input: SentinelInput): Promise<Snapshot> {
-  const { max_retries, retry_backoff_ms, timeout_secs, target_url, selector, ignore_selectors, ignore_regexes } =
-    input;
+  const {
+    max_retries,
+    retry_backoff_ms,
+    timeout_secs,
+    target_url,
+    selector,
+    ignore_selectors,
+    ignore_regexes,
+    max_redirects,
+    max_content_bytes,
+  } = input;
 
   const { status, headers, text: html } = await withRetries(
     async () => {
-      const res = await fetchText(target_url, timeout_secs);
-      if (res.status >= 400) {
-        throw new HttpError(`Fetch failed with status ${res.status}`, res.status);
+      let currentUrl = target_url;
+      for (let i = 0; i <= max_redirects; i++) {
+        await assertSafeHttpUrl(currentUrl, 'target_url');
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeout_secs * 1000);
+        try {
+          const res = await fetch(currentUrl, {
+            method: 'GET',
+            redirect: 'manual',
+            signal: controller.signal,
+            headers: {
+              'user-agent': 'SentinelWebhook/0.1 (+https://github.com/firasmosbehi/sentinel-webhook)',
+              accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+          });
+
+          if (REDIRECT_STATUS_CODES.has(res.status)) {
+            const loc = res.headers.get('location');
+            if (!loc) throw new HttpError(`Redirect status ${res.status} missing Location header`, res.status);
+            if (i === max_redirects) throw new HttpError(`Too many redirects (>${max_redirects})`, res.status);
+            currentUrl = new URL(loc, currentUrl).toString();
+            continue;
+          }
+
+          if (res.status >= 400) {
+            throw new HttpError(`Fetch failed with status ${res.status}`, res.status);
+          }
+
+          const { text } = await readResponseTextWithLimit(res, max_content_bytes);
+          return { status: res.status, headers: res.headers, text };
+        } finally {
+          clearTimeout(timeout);
+        }
       }
-      return res;
+
+      // Should be unreachable, but keeps TS happy.
+      throw new Error('Too many redirects');
     },
     {
       maxRetries: max_retries,
@@ -90,4 +114,3 @@ export async function buildSnapshot(input: SentinelInput): Promise<Snapshot> {
     contentHash: sha256Hex(extracted.text),
   };
 }
-

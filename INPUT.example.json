@@ -4,11 +4,14 @@
   "webhook_url": "https://httpbin.org/post",
   "baseline_mode": "store_only",
   "state_store_name": "sentinel-state",
+  "dead_letter_dataset_name": "sentinel-dead-letter",
   "timeout_secs": 30,
   "max_retries": 3,
   "retry_backoff_ms": 1000,
+  "max_redirects": 5,
+  "max_content_bytes": 2000000,
   "ignore_selectors": [],
   "ignore_regexes": [],
+  "redact_logs": true,
   "debug": false
 }
-

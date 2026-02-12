@@ -1,5 +1,8 @@
 import { withRetries } from './retry.js';
 import { hmacSha256Hex } from './hash.js';
+import { readResponseTextWithLimit } from './http.js';
+import { assertSafeHttpUrl } from './url_safety.js';
+import { redactText, truncate } from './redact.js';
 import type { SentinelInput, ChangePayload } from './types.js';
 
 export class WebhookDeliveryError extends Error {
@@ -21,22 +24,38 @@ function isRetryableWebhookError(err: unknown): boolean {
   return false;
 }
 
-async function postJson(url: string, payload: unknown, headers: Record<string, string>, timeoutSecs: number): Promise<void> {
+async function postJson(
+  url: string,
+  bodyJson: string,
+  headers: Record<string, string>,
+  timeoutSecs: number,
+  redactLogs: boolean,
+): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutSecs * 1000);
   try {
     const res = await fetch(url, {
       method: 'POST',
-      redirect: 'follow',
+      redirect: 'manual',
       signal: controller.signal,
       headers,
-      body: JSON.stringify(payload),
+      body: bodyJson,
     });
 
     if (res.status < 200 || res.status >= 300) {
-      const text = await res.text().catch(() => '');
+      // Only read a small chunk for debugging; avoid logging huge bodies.
+      let text = '';
+      try {
+        const read = await readResponseTextWithLimit(res, 4_096);
+        text = read.text;
+      } catch {
+        // Ignore read failures.
+      }
+
+      if (redactLogs) text = redactText(text);
+      const truncated = truncate(text, 500);
       throw new WebhookDeliveryError(
-        `Webhook responded with status ${res.status}${text ? `: ${text.slice(0, 500)}` : ''}`,
+        `Webhook responded with status ${res.status}${truncated.text ? `: ${truncated.text}` : ''}`,
         res.status,
       );
     }
@@ -45,7 +64,9 @@ async function postJson(url: string, payload: unknown, headers: Record<string, s
   }
 }
 
-export async function sendWebhook(input: SentinelInput, payload: ChangePayload): Promise<void> {
+export async function sendWebhook(input: SentinelInput, payload: ChangePayload): Promise<{ attempts: number }> {
+  await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
+
   const json = JSON.stringify(payload);
   const headers: Record<string, string> = {
     'content-type': 'application/json; charset=utf-8',
@@ -56,13 +77,18 @@ export async function sendWebhook(input: SentinelInput, payload: ChangePayload):
     headers['x-sentinel-signature'] = `sha256=${hmacSha256Hex(input.webhook_secret, json)}`;
   }
 
+  let attempts = 0;
   await withRetries(
-    async () => postJson(input.webhook_url, payload, headers, input.timeout_secs),
+    async (attempt) => {
+      attempts = attempt + 1;
+      return postJson(input.webhook_url, json, headers, input.timeout_secs, input.redact_logs);
+    },
     {
       maxRetries: input.max_retries,
       baseBackoffMs: input.retry_backoff_ms,
       shouldRetry: isRetryableWebhookError,
     },
   );
-}
 
+  return { attempts };
+}

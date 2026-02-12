@@ -8,11 +8,15 @@ export type SentinelInput = {
   webhook_secret?: string;
   baseline_mode: BaselineMode;
   state_store_name: string;
+  dead_letter_dataset_name: string;
   timeout_secs: number;
   max_retries: number;
   retry_backoff_ms: number;
+  max_redirects: number;
+  max_content_bytes: number;
   ignore_selectors: string[];
   ignore_regexes: string[];
+  redact_logs: boolean;
   debug: boolean;
 };
 
@@ -30,6 +34,7 @@ export type Snapshot = {
 };
 
 export type ChangePayload = {
+  schema_version: 1;
   event: 'CHANGE_DETECTED' | 'BASELINE_STORED';
   url: string;
   selector?: string;

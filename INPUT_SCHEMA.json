@@ -49,6 +49,13 @@
       "editor": "textfield",
       "default": "sentinel-state"
     },
+    "dead_letter_dataset_name": {
+      "title": "Dead-letter dataset name",
+      "type": "string",
+      "description": "Dataset name where failed webhook deliveries will be stored for later inspection/replay.",
+      "editor": "textfield",
+      "default": "sentinel-dead-letter"
+    },
     "timeout_secs": {
       "title": "Timeout (seconds)",
       "type": "integer",
@@ -70,6 +77,20 @@
       "default": 1000,
       "minimum": 0
     },
+    "max_redirects": {
+      "title": "Max redirects",
+      "type": "integer",
+      "description": "Maximum number of redirects to follow when fetching the target URL.",
+      "default": 5,
+      "minimum": 0
+    },
+    "max_content_bytes": {
+      "title": "Max content bytes",
+      "type": "integer",
+      "description": "Maximum number of bytes to download from the target response body.",
+      "default": 2000000,
+      "minimum": 1
+    },
     "ignore_selectors": {
       "title": "Ignore selectors (optional)",
       "type": "array",
@@ -83,6 +104,12 @@
       "description": "Regex patterns to scrub from extracted text (e.g. timestamps, tokens). Supports either plain patterns or /pattern/flags.",
       "editor": "stringList",
       "items": { "type": "string" }
+    },
+    "redact_logs": {
+      "title": "Redact logs",
+      "type": "boolean",
+      "description": "Redact sensitive-looking values (tokens/secrets) in logs and datasets.",
+      "default": true
     },
     "debug": {
       "title": "Debug logging",

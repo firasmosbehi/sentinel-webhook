@@ -22,11 +22,15 @@ const rawInputSchema = z
     webhook_secret: z.string().min(1).optional(),
     baseline_mode: baselineModeSchema.optional(),
     state_store_name: z.string().trim().min(1).optional(),
+    dead_letter_dataset_name: z.string().trim().min(1).optional(),
     timeout_secs: z.coerce.number().int().min(1).optional(),
     max_retries: z.coerce.number().int().min(0).optional(),
     retry_backoff_ms: z.coerce.number().int().min(0).optional(),
+    max_redirects: z.coerce.number().int().min(0).optional(),
+    max_content_bytes: z.coerce.number().int().min(1).optional(),
     ignore_selectors: z.array(z.string().trim().min(1)).optional(),
     ignore_regexes: z.array(z.string().trim().min(1)).optional(),
+    redact_logs: z.coerce.boolean().optional(),
     debug: z.coerce.boolean().optional(),
   })
   .strict();
@@ -42,11 +46,15 @@ export function parseInput(raw: unknown): SentinelInput {
     webhook_secret: parsed.webhook_secret,
     baseline_mode: parsed.baseline_mode ?? 'store_only',
     state_store_name: parsed.state_store_name ?? 'sentinel-state',
+    dead_letter_dataset_name: parsed.dead_letter_dataset_name ?? 'sentinel-dead-letter',
     timeout_secs: parsed.timeout_secs ?? 30,
     max_retries: parsed.max_retries ?? 3,
     retry_backoff_ms: parsed.retry_backoff_ms ?? 1000,
+    max_redirects: parsed.max_redirects ?? 5,
+    max_content_bytes: parsed.max_content_bytes ?? 2_000_000,
     ignore_selectors: parsed.ignore_selectors ?? [],
     ignore_regexes: parsed.ignore_regexes ?? [],
+    redact_logs: parsed.redact_logs ?? true,
     debug: parsed.debug ?? false,
   };
 }
