@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import type { BaselineMode, HistoryMode, SentinelInput } from './types.js';
+import { normalizeHttpUrl } from './url_normalize.js';
 
 const httpUrl = z
   .string()
   .url()
-  .refine((u) => u.startsWith('http://') || u.startsWith('https://'), {
+  .refine((u) => u.toLowerCase().startsWith('http://') || u.toLowerCase().startsWith('https://'), {
     message: 'Must be an http(s) URL',
   });
 
@@ -23,8 +24,22 @@ const rawInputSchema = z
   .object({
     target_url: httpUrl,
     selector: z.string().trim().min(1).optional(),
+    fetch_headers: z.record(z.string(), z.string()).optional(),
+    proxy_configuration: z
+      .object({
+        use_apify_proxy: z.coerce.boolean().optional(),
+        apify_proxy_groups: z.array(z.string().trim().min(1)).optional(),
+        apify_proxy_country: z.string().trim().min(1).optional(),
+        proxy_urls: z.array(httpUrl).optional(),
+      })
+      .strict()
+      .optional(),
+    target_domain_allowlist: z.array(z.string().trim().min(1)).optional(),
+    target_domain_denylist: z.array(z.string().trim().min(1)).optional(),
     webhook_url: httpUrl,
     webhook_headers: z.record(z.string(), z.string()).optional(),
+    webhook_domain_allowlist: z.array(z.string().trim().min(1)).optional(),
+    webhook_domain_denylist: z.array(z.string().trim().min(1)).optional(),
     webhook_secret: z.string().min(1).optional(),
     baseline_mode: baselineModeSchema.optional(),
     state_store_name: z.string().trim().min(1).optional(),
@@ -37,6 +52,7 @@ const rawInputSchema = z
     retry_backoff_ms: z.coerce.number().int().min(0).optional(),
 
     fetch_timeout_secs: z.coerce.number().int().min(1).optional(),
+    fetch_connect_timeout_secs: z.coerce.number().int().min(1).optional(),
     fetch_max_retries: z.coerce.number().int().min(0).optional(),
     fetch_retry_backoff_ms: z.coerce.number().int().min(0).optional(),
 
@@ -66,11 +82,26 @@ export function parseInput(raw: unknown): SentinelInput {
   const max_retries = parsed.max_retries ?? 3;
   const retry_backoff_ms = parsed.retry_backoff_ms ?? 1000;
 
+  const proxy_configuration = parsed.proxy_configuration;
+
   return {
-    target_url: parsed.target_url,
+    target_url: normalizeHttpUrl(parsed.target_url),
     selector: parsed.selector,
-    webhook_url: parsed.webhook_url,
+    fetch_headers: parsed.fetch_headers ?? {},
+    proxy_configuration: proxy_configuration
+      ? {
+          use_apify_proxy: proxy_configuration.use_apify_proxy,
+          apify_proxy_groups: proxy_configuration.apify_proxy_groups,
+          apify_proxy_country: proxy_configuration.apify_proxy_country,
+          proxy_urls: proxy_configuration.proxy_urls,
+        }
+      : undefined,
+    target_domain_allowlist: parsed.target_domain_allowlist ?? [],
+    target_domain_denylist: parsed.target_domain_denylist ?? [],
+    webhook_url: normalizeHttpUrl(parsed.webhook_url),
     webhook_headers: parsed.webhook_headers ?? {},
+    webhook_domain_allowlist: parsed.webhook_domain_allowlist ?? [],
+    webhook_domain_denylist: parsed.webhook_domain_denylist ?? [],
     webhook_secret: parsed.webhook_secret,
     baseline_mode: parsed.baseline_mode ?? 'store_only',
     state_store_name: parsed.state_store_name ?? 'sentinel-state',
@@ -83,6 +114,7 @@ export function parseInput(raw: unknown): SentinelInput {
     retry_backoff_ms,
 
     fetch_timeout_secs: parsed.fetch_timeout_secs ?? timeout_secs,
+    fetch_connect_timeout_secs: parsed.fetch_connect_timeout_secs ?? Math.min(10, parsed.fetch_timeout_secs ?? timeout_secs),
     fetch_max_retries: parsed.fetch_max_retries ?? max_retries,
     fetch_retry_backoff_ms: parsed.fetch_retry_backoff_ms ?? retry_backoff_ms,
 

@@ -3,6 +3,7 @@ import { hmacSha256Hex } from './hash.js';
 import { readResponseTextWithLimit } from './http.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { redactText, truncate } from './redact.js';
+import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
 import type { SentinelInput, ChangePayload } from './types.js';
 
 export class WebhookDeliveryError extends Error {
@@ -65,6 +66,10 @@ async function postJson(
 
 export async function sendWebhook(input: SentinelInput, payload: ChangePayload): Promise<{ attempts: number }> {
   await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
+  assertUrlAllowedByDomainPolicy(input.webhook_url, 'webhook_url', {
+    allowlist: input.webhook_domain_allowlist,
+    denylist: input.webhook_domain_denylist,
+  });
 
   const json = JSON.stringify(payload);
   const headers: Record<string, string> = {

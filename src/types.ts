@@ -2,11 +2,24 @@ export type BaselineMode = 'store_only' | 'notify';
 
 export type HistoryMode = 'none' | 'changes_only' | 'all_events';
 
+export type ProxyConfigurationInput = {
+  use_apify_proxy?: boolean;
+  apify_proxy_groups?: string[];
+  apify_proxy_country?: string;
+  proxy_urls?: string[];
+};
+
 export type SentinelInput = {
   target_url: string;
   selector?: string;
+  fetch_headers: Record<string, string>;
+  proxy_configuration?: ProxyConfigurationInput;
+  target_domain_allowlist: string[];
+  target_domain_denylist: string[];
   webhook_url: string;
   webhook_headers: Record<string, string>;
+  webhook_domain_allowlist: string[];
+  webhook_domain_denylist: string[];
   webhook_secret?: string;
   baseline_mode: BaselineMode;
   state_store_name: string;
@@ -21,6 +34,7 @@ export type SentinelInput = {
 
   // Preferred split settings.
   fetch_timeout_secs: number;
+  fetch_connect_timeout_secs: number;
   fetch_max_retries: number;
   fetch_retry_backoff_ms: number;
 

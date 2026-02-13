@@ -10,6 +10,7 @@ import { assertSafeHttpUrl } from './url_safety.js';
 import { redactText, redactUrl, truncate } from './redact.js';
 import { computeEventId } from './event_id.js';
 import { limitPayloadBytes } from './payload_limit.js';
+import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
 import type { ChangePayload, Snapshot } from './types.js';
 
 function toError(err: unknown): Error {
@@ -83,6 +84,14 @@ await Actor.main(async () => {
   // Fail fast on unsafe URLs (SSRF protection).
   await assertSafeHttpUrl(input.target_url, 'target_url');
   await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
+  assertUrlAllowedByDomainPolicy(input.target_url, 'target_url', {
+    allowlist: input.target_domain_allowlist,
+    denylist: input.target_domain_denylist,
+  });
+  assertUrlAllowedByDomainPolicy(input.webhook_url, 'webhook_url', {
+    allowlist: input.webhook_domain_allowlist,
+    denylist: input.webhook_domain_denylist,
+  });
 
   const kv = await Actor.openKeyValueStore(input.state_store_name);
   const stateKey = makeStateKey(input.target_url, input.selector);
@@ -121,7 +130,7 @@ await Actor.main(async () => {
 
   let current: Snapshot;
   try {
-    current = await buildSnapshot(input);
+    current = await buildSnapshot(input, previous);
   } catch (err) {
     log.exception(toError(err), 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
     await Actor.pushData({

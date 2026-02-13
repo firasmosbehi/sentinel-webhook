@@ -1,10 +1,18 @@
 {
   "target_url": "https://example.com",
   "selector": "h1",
+  "fetch_headers": {},
+  "proxy_configuration": {
+    "use_apify_proxy": false
+  },
+  "target_domain_allowlist": [],
+  "target_domain_denylist": [],
   "webhook_url": "https://httpbin.org/post",
   "webhook_headers": {
     "x-sentinel-example": "true"
   },
+  "webhook_domain_allowlist": [],
+  "webhook_domain_denylist": [],
   "baseline_mode": "store_only",
   "state_store_name": "sentinel-state",
   "dead_letter_dataset_name": "sentinel-dead-letter",
@@ -12,6 +20,7 @@
   "history_mode": "changes_only",
 
   "fetch_timeout_secs": 30,
+  "fetch_connect_timeout_secs": 10,
   "fetch_max_retries": 3,
   "fetch_retry_backoff_ms": 1000,
 

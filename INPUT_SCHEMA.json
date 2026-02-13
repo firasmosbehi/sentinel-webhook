@@ -15,11 +15,51 @@
       "description": "Optional CSS selector to watch only a specific part of the page (e.g. .price, #stock-count).",
       "editor": "textfield"
     },
+    "fetch_headers": {
+      "title": "Fetch headers (optional)",
+      "type": "object",
+      "description": "Extra HTTP headers to include when fetching the target URL.",
+      "editor": "json"
+    },
+    "proxy_configuration": {
+      "title": "Proxy configuration (optional)",
+      "type": "object",
+      "description": "Optional proxy configuration for fetching the target URL. Example: {\"use_apify_proxy\": true, \"apify_proxy_groups\": [\"RESIDENTIAL\"], \"apify_proxy_country\": \"US\"} or {\"proxy_urls\": [\"http://user:pass@proxy:3128\"]}.",
+      "editor": "json"
+    },
+    "target_domain_allowlist": {
+      "title": "Target domain allowlist (optional)",
+      "type": "array",
+      "description": "If set, only these domains/patterns are allowed for target_url and redirects. Patterns support exact hostnames and wildcard subdomains like *.example.com.",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "target_domain_denylist": {
+      "title": "Target domain denylist (optional)",
+      "type": "array",
+      "description": "Domains/patterns that are always blocked for target_url and redirects (deny takes precedence over allow).",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
     "webhook_url": {
       "title": "Webhook URL",
       "type": "string",
       "description": "Callback URL to POST change events to.",
       "editor": "textfield"
+    },
+    "webhook_domain_allowlist": {
+      "title": "Webhook domain allowlist (optional)",
+      "type": "array",
+      "description": "If set, only these domains/patterns are allowed for webhook_url. Patterns support exact hostnames and wildcard subdomains like *.example.com.",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "webhook_domain_denylist": {
+      "title": "Webhook domain denylist (optional)",
+      "type": "array",
+      "description": "Domains/patterns that are always blocked for webhook_url (deny takes precedence over allow).",
+      "editor": "stringList",
+      "items": { "type": "string" }
     },
     "webhook_headers": {
       "title": "Webhook headers (optional)",
@@ -97,6 +137,13 @@
       "type": "integer",
       "description": "Timeout applied to fetching the target URL.",
       "default": 30,
+      "minimum": 1
+    },
+    "fetch_connect_timeout_secs": {
+      "title": "Fetch connect timeout (seconds)",
+      "type": "integer",
+      "description": "Timeout applied to establishing a network connection when fetching the target URL (best-effort).",
+      "default": 10,
       "minimum": 1
     },
     "fetch_max_retries": {
