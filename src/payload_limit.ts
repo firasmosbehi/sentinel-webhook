@@ -1,5 +1,5 @@
 import { truncate } from './redact.js';
-import type { ChangePayload } from './types.js';
+import type { ChangePayload, WebhookPayload } from './types.js';
 
 function jsonByteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
@@ -62,21 +62,21 @@ function buildTruncatedPayload(payload: ChangePayload, oldChars: number, newChar
 }
 
 export function limitPayloadBytes(
-  payload: ChangePayload,
+  payload: WebhookPayload,
   maxBytes: number,
-): { payload: ChangePayload; truncated: boolean } {
+): { payload: WebhookPayload; truncated: boolean } {
   const initialBytes = jsonByteLength(payload);
   if (initialBytes <= maxBytes) return { payload, truncated: false };
 
   // Only change payload text is truncatable today.
-  if (!payload.changes || !payload.changes.text) {
+  if (!('changes' in payload) || !payload.changes || !payload.changes.text) {
     throw new Error(`Payload exceeds max_payload_bytes (${initialBytes} > ${maxBytes}) but has no changes to truncate.`);
   }
 
   const oldLen = payload.changes.text.old.length;
   const newLen = payload.changes.text.new.length;
 
-  const minimal = buildTruncatedPayload(payload, 0, 0);
+  const minimal = buildTruncatedPayload(payload as ChangePayload, 0, 0);
   const minimalBytes = jsonByteLength(minimal);
   if (minimalBytes > maxBytes) {
     throw new Error(
@@ -93,7 +93,7 @@ export function limitPayloadBytes(
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     const { oldChars, newChars } = allocateChars(mid, oldLen, newLen);
-    const candidate = buildTruncatedPayload(payload, oldChars, newChars);
+    const candidate = buildTruncatedPayload(payload as ChangePayload, oldChars, newChars);
     const bytes = jsonByteLength(candidate);
 
     if (bytes <= maxBytes) {

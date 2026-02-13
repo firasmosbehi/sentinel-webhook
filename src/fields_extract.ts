@@ -31,9 +31,9 @@ function collapseWhitespace(text: string): string {
 export function extractFieldsFromHtml(
   html: string,
   fields: FieldSpec[],
-  opts: { ignoreSelectors: string[]; ignoreAttributes: string[]; ignoreRegexes: string[] },
+  opts: { ignoreSelectors: string[]; ignoreAttributes: string[]; ignoreRegexes: string[]; xmlMode?: boolean },
 ): Record<string, string> {
-  const $ = cheerio.load(html);
+  const $ = cheerio.load(html, opts.xmlMode ? { xmlMode: true } : undefined);
 
   $('script, style, noscript, template').remove();
 
@@ -97,4 +97,3 @@ export function extractFieldsFromHtml(
 
   return out;
 }
-

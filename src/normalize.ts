@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
+import type { SelectorAggregationMode, UnicodeNormalization, WhitespaceMode } from './types.js';
 
 export class EmptySelectorMatchError extends Error {
   public readonly selector: string;
@@ -16,6 +17,10 @@ export type NormalizeOptions = {
   ignoreSelectors: string[];
   ignoreAttributes: string[];
   ignoreRegexes: string[];
+  xmlMode?: boolean;
+  selectorAggregationMode?: SelectorAggregationMode;
+  whitespaceMode?: WhitespaceMode;
+  unicodeNormalization?: UnicodeNormalization;
 };
 
 function compileRegex(pattern: string): RegExp {
@@ -35,7 +40,9 @@ function compileRegex(pattern: string): RegExp {
 }
 
 export function normalizeHtmlToSnapshot(html: string, opts: NormalizeOptions): { text: string; html?: string } {
-  const $ = cheerio.load(html);
+  // Remove HTML comments to avoid false positives from embedded build ids or debug banners.
+  const withoutComments = html.replace(/<!--[\\s\\S]*?-->/g, '');
+  const $ = cheerio.load(withoutComments, opts.xmlMode ? { xmlMode: true } : undefined);
 
   // Always remove the most common noise sources.
   $('script, style, noscript, template').remove();
@@ -74,12 +81,17 @@ export function normalizeHtmlToSnapshot(html: string, opts: NormalizeOptions): {
       throw new EmptySelectorMatchError(opts.selector);
     }
 
-    pickedHtml = nodes
-      .toArray()
-      .map((el: AnyNode) => $.html(el))
-      .join('\n');
-
-    pickedText = nodes.text();
+    if (opts.selectorAggregationMode === 'first') {
+      const first = nodes.first();
+      pickedHtml = $.html(first.get(0) as AnyNode);
+      pickedText = first.text();
+    } else {
+      pickedHtml = nodes
+        .toArray()
+        .map((el: AnyNode) => $.html(el))
+        .join('\n');
+      pickedText = nodes.text();
+    }
   } else {
     const body = $('body');
     pickedHtml = body.length ? body.html() ?? undefined : $.root().html() ?? undefined;
@@ -96,8 +108,23 @@ export function normalizeHtmlToSnapshot(html: string, opts: NormalizeOptions): {
     pickedText = pickedText.replace(re, '');
   }
 
-  // Collapse whitespace for stability across formatting-only changes.
-  pickedText = pickedText.replace(/\s+/g, ' ').trim();
+  if (opts.unicodeNormalization === 'NFKC') {
+    pickedText = pickedText.normalize('NFKC');
+  }
+
+  if (opts.whitespaceMode === 'preserve_lines') {
+    pickedText = pickedText
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .split('\n')
+      .map((l) => l.replace(/[ \t]+/g, ' ').trim())
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  } else {
+    // Collapse whitespace for stability across formatting-only changes.
+    pickedText = pickedText.replace(/\s+/g, ' ').trim();
+  }
 
   return { text: pickedText, html: pickedHtml };
 }

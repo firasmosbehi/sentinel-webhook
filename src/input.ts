@@ -1,13 +1,19 @@
 import { z } from 'zod';
 import type {
   BaselineMode,
+  CookieSpec,
   HistoryMode,
   IgnoreRegexPreset,
   OnEmptySnapshotBehavior,
+  RobotsTxtMode,
   RunMode,
+  SelectorAggregationMode,
   RenderingMode,
+  UnicodeNormalization,
   SentinelInput,
   WaitUntil,
+  WebhookDeliveryMode,
+  WhitespaceMode,
 } from './types.js';
 import { normalizeHttpUrl } from './url_normalize.js';
 import { expandIgnoreRegexPresets } from './regex_presets.js';
@@ -52,6 +58,18 @@ const ignoreRegexPresetSchema: z.ZodType<IgnoreRegexPreset> = z.union([
   z.literal('tokens'),
 ]);
 
+const selectorAggregationModeSchema: z.ZodType<SelectorAggregationMode> = z.union([z.literal('first'), z.literal('all')]);
+
+const whitespaceModeSchema: z.ZodType<WhitespaceMode> = z.union([z.literal('collapse'), z.literal('preserve_lines')]);
+
+const unicodeNormalizationSchema: z.ZodType<UnicodeNormalization> = z.union([z.literal('none'), z.literal('NFKC')]);
+
+const robotsTxtModeSchema: z.ZodType<RobotsTxtMode> = z.union([z.literal('ignore'), z.literal('respect')]);
+
+const webhookDeliveryModeSchema: z.ZodType<WebhookDeliveryMode> = z.union([z.literal('all'), z.literal('any')]);
+
+const screenshotScopeSchema = z.union([z.literal('full_page'), z.literal('selector')]);
+
 const fieldTextSchema = z
   .object({
     name: z.string().trim().min(1),
@@ -66,6 +84,19 @@ const fieldAttributeSchema = z
     selector: z.string().trim().min(1),
     type: z.literal('attribute'),
     attribute: z.string().trim().min(1),
+  })
+  .strict();
+
+const cookieSpecSchema: z.ZodType<CookieSpec> = z
+  .object({
+    name: z.string().trim().min(1),
+    value: z.string(),
+    domain: z.string().trim().min(1).optional(),
+    path: z.string().trim().min(1).optional(),
+    expires: z.coerce.number().optional(),
+    httpOnly: z.coerce.boolean().optional(),
+    secure: z.coerce.boolean().optional(),
+    sameSite: z.union([z.literal('Strict'), z.literal('Lax'), z.literal('None')]).optional(),
   })
   .strict();
 
@@ -88,6 +119,10 @@ const rawInputSchema = z
     wait_until: waitUntilSchema.optional(),
     wait_for_selector: z.string().trim().min(1).optional(),
     wait_for_selector_timeout_secs: z.coerce.number().int().min(1).optional(),
+    playwright_block_resources: z.coerce.boolean().optional(),
+    screenshot_on_change: z.coerce.boolean().optional(),
+    screenshot_scope: screenshotScopeSchema.optional(),
+    screenshot_selector: z.string().trim().min(1).optional(),
     fetch_headers: z.record(z.string(), z.string()).optional(),
     proxy_configuration: z
       .object({
@@ -100,19 +135,32 @@ const rawInputSchema = z
       .optional(),
     target_domain_allowlist: z.array(z.string().trim().min(1)).optional(),
     target_domain_denylist: z.array(z.string().trim().min(1)).optional(),
-    webhook_url: httpUrl,
+    target_method: z.string().trim().min(1).optional(),
+    target_body: z.string().optional(),
+    target_cookies: z.array(cookieSpecSchema).optional(),
+    robots_txt_mode: robotsTxtModeSchema.optional(),
+    block_page_regexes: z.array(z.string().trim().min(1)).optional(),
+    webhook_url: httpUrl.optional(),
+    webhook_urls: z.array(httpUrl).min(1).optional(),
+    webhook_delivery_mode: webhookDeliveryModeSchema.optional(),
+    webhook_method: z.string().trim().min(1).optional(),
+    webhook_content_type: z.string().trim().min(1).optional(),
     webhook_headers: z.record(z.string(), z.string()).optional(),
     webhook_domain_allowlist: z.array(z.string().trim().min(1)).optional(),
     webhook_domain_denylist: z.array(z.string().trim().min(1)).optional(),
     webhook_secret: z.string().min(1).optional(),
     baseline_mode: baselineModeSchema.optional(),
     state_store_name: z.string().trim().min(1).optional(),
+    compress_snapshots: z.coerce.boolean().optional(),
+    snapshot_history_limit: z.coerce.number().int().min(0).optional(),
     dead_letter_dataset_name: z.string().trim().min(1).optional(),
     replay_limit: z.coerce.number().int().min(1).optional(),
     replay_use_stored_webhook_url: z.coerce.boolean().optional(),
     replay_dry_run: z.coerce.boolean().optional(),
     history_dataset_name: z.string().trim().min(1).optional(),
     history_mode: historyModeSchema.optional(),
+    artifact_store_name: z.string().trim().min(1).optional(),
+    store_debug_artifacts: z.coerce.boolean().optional(),
 
     timeout_secs: z.coerce.number().int().min(1).optional(),
     max_retries: z.coerce.number().int().min(0).optional(),
@@ -134,12 +182,19 @@ const rawInputSchema = z
     max_content_bytes: z.coerce.number().int().min(1).optional(),
     politeness_delay_ms: z.coerce.number().int().min(0).optional(),
     politeness_jitter_ms: z.coerce.number().int().min(0).optional(),
+    schedule_jitter_ms: z.coerce.number().int().min(0).optional(),
     max_concurrency: z.coerce.number().int().min(1).optional(),
     max_payload_bytes: z.coerce.number().int().min(1024).optional(),
     reset_baseline: z.coerce.boolean().optional(),
     min_text_length: z.coerce.number().int().min(0).optional(),
     on_empty_snapshot: onEmptySnapshotSchema.optional(),
     min_change_ratio: z.coerce.number().min(0).max(1).optional(),
+    include_unified_diff: z.coerce.boolean().optional(),
+    unified_diff_context_lines: z.coerce.number().int().min(0).optional(),
+    unified_diff_max_chars: z.coerce.number().int().min(0).optional(),
+    selector_aggregation_mode: selectorAggregationModeSchema.optional(),
+    whitespace_mode: whitespaceModeSchema.optional(),
+    unicode_normalization: unicodeNormalizationSchema.optional(),
     fields: z.array(z.union([fieldTextSchema, fieldAttributeSchema])).optional(),
     ignore_json_paths: z.array(z.string().trim().min(1)).optional(),
 
@@ -147,12 +202,23 @@ const rawInputSchema = z
     ignore_attributes: z.array(z.string().trim().min(1)).optional(),
     ignore_regexes: z.array(z.string().trim().min(1)).optional(),
     ignore_regex_presets: z.array(ignoreRegexPresetSchema).optional(),
+    allow_localhost: z.coerce.boolean().optional(),
+    notify_on_no_change: z.coerce.boolean().optional(),
+    notify_on_fetch_failure: z.coerce.boolean().optional(),
+    fetch_failure_debounce_secs: z.coerce.number().int().min(0).optional(),
+    webhook_circuit_breaker_enabled: z.coerce.boolean().optional(),
+    webhook_circuit_failure_threshold: z.coerce.number().int().min(1).optional(),
+    webhook_circuit_cooldown_secs: z.coerce.number().int().min(0).optional(),
     redact_logs: z.coerce.boolean().optional(),
     debug: z.coerce.boolean().optional(),
+    structured_logs: z.coerce.boolean().optional(),
   })
   .strict()
   .refine((d) => d.mode === 'replay_dead_letter' || !!d.target_url || (Array.isArray(d.targets) && d.targets.length > 0), {
     message: 'Provide target_url or non-empty targets[]',
+  })
+  .refine((d) => d.mode === 'replay_dead_letter' || !!d.webhook_url || (Array.isArray(d.webhook_urls) && d.webhook_urls.length > 0), {
+    message: 'Provide webhook_url or non-empty webhook_urls[]',
   });
 
 export function parseInput(raw: unknown): SentinelInput {
@@ -203,6 +269,20 @@ export function parseInput(raw: unknown): SentinelInput {
     throw new Error('Provide target_url or non-empty targets[]');
   }
 
+  const webhookUrls = (parsed.webhook_urls?.length ? parsed.webhook_urls : parsed.webhook_url ? [parsed.webhook_url] : []).map(
+    (u) => normalizeHttpUrl(u),
+  );
+  if (mode === 'monitor' && webhookUrls.length === 0) {
+    // Should be prevented by schema refine, but keep a defensive runtime guard.
+    throw new Error('Provide webhook_url or non-empty webhook_urls[]');
+  }
+
+  const target_method = (parsed.target_method ?? 'GET').toUpperCase();
+  if (!/^[A-Z]+$/.test(target_method)) throw new Error(`Invalid target_method: ${parsed.target_method ?? ''}`);
+
+  const webhook_method = (parsed.webhook_method ?? 'POST').toUpperCase();
+  if (!/^[A-Z]+$/.test(webhook_method)) throw new Error(`Invalid webhook_method: ${parsed.webhook_method ?? ''}`);
+
   return {
     mode,
     target_url: primaryTargetUrl ?? 'https://example.com/',
@@ -212,7 +292,16 @@ export function parseInput(raw: unknown): SentinelInput {
     wait_until: parsed.wait_until ?? 'domcontentloaded',
     wait_for_selector: parsed.wait_for_selector,
     wait_for_selector_timeout_secs: parsed.wait_for_selector_timeout_secs ?? 10,
+    playwright_block_resources: parsed.playwright_block_resources ?? false,
+    screenshot_on_change: parsed.screenshot_on_change ?? false,
+    screenshot_scope: parsed.screenshot_scope ?? 'full_page',
+    screenshot_selector: parsed.screenshot_selector,
     fetch_headers: parsed.fetch_headers ?? {},
+    target_method,
+    target_body: parsed.target_body,
+    target_cookies: parsed.target_cookies ?? [],
+    robots_txt_mode: parsed.robots_txt_mode ?? 'ignore',
+    block_page_regexes: parsed.block_page_regexes ?? [],
     proxy_configuration: proxy_configuration
       ? {
           use_apify_proxy: proxy_configuration.use_apify_proxy,
@@ -223,19 +312,27 @@ export function parseInput(raw: unknown): SentinelInput {
       : undefined,
     target_domain_allowlist: parsed.target_domain_allowlist ?? [],
     target_domain_denylist: parsed.target_domain_denylist ?? [],
-    webhook_url: normalizeHttpUrl(parsed.webhook_url),
+    webhook_url: webhookUrls[0] ?? 'https://example.com/',
+    webhook_urls: webhookUrls.length > 0 ? webhookUrls : ['https://example.com/'],
+    webhook_delivery_mode: parsed.webhook_delivery_mode ?? 'all',
+    webhook_method,
+    webhook_content_type: parsed.webhook_content_type ?? 'application/json; charset=utf-8',
     webhook_headers: parsed.webhook_headers ?? {},
     webhook_domain_allowlist: parsed.webhook_domain_allowlist ?? [],
     webhook_domain_denylist: parsed.webhook_domain_denylist ?? [],
     webhook_secret: parsed.webhook_secret,
     baseline_mode: parsed.baseline_mode ?? 'store_only',
     state_store_name: parsed.state_store_name ?? 'sentinel-state',
+    compress_snapshots: parsed.compress_snapshots ?? false,
+    snapshot_history_limit: parsed.snapshot_history_limit ?? 0,
     dead_letter_dataset_name: parsed.dead_letter_dataset_name ?? 'sentinel-dead-letter',
     replay_limit: parsed.replay_limit ?? 100,
     replay_use_stored_webhook_url: parsed.replay_use_stored_webhook_url ?? true,
     replay_dry_run: parsed.replay_dry_run ?? false,
     history_dataset_name: parsed.history_dataset_name ?? 'sentinel-history',
     history_mode: parsed.history_mode ?? 'changes_only',
+    artifact_store_name: parsed.artifact_store_name ?? 'sentinel-artifacts',
+    store_debug_artifacts: parsed.store_debug_artifacts ?? false,
 
     timeout_secs,
     max_retries,
@@ -257,12 +354,19 @@ export function parseInput(raw: unknown): SentinelInput {
     max_content_bytes: parsed.max_content_bytes ?? 2_000_000,
     politeness_delay_ms: parsed.politeness_delay_ms ?? 0,
     politeness_jitter_ms: parsed.politeness_jitter_ms ?? 0,
+    schedule_jitter_ms: parsed.schedule_jitter_ms ?? 0,
     max_concurrency: parsed.max_concurrency ?? 1,
     max_payload_bytes: parsed.max_payload_bytes ?? 250_000,
     reset_baseline: parsed.reset_baseline ?? false,
     min_text_length: parsed.min_text_length ?? 0,
     on_empty_snapshot: parsed.on_empty_snapshot ?? 'error',
     min_change_ratio: parsed.min_change_ratio ?? 0,
+    include_unified_diff: parsed.include_unified_diff ?? false,
+    unified_diff_context_lines: parsed.unified_diff_context_lines ?? 3,
+    unified_diff_max_chars: parsed.unified_diff_max_chars ?? 20_000,
+    selector_aggregation_mode: parsed.selector_aggregation_mode ?? 'all',
+    whitespace_mode: parsed.whitespace_mode ?? 'collapse',
+    unicode_normalization: parsed.unicode_normalization ?? 'none',
     fields,
     ignore_json_paths,
 
@@ -270,7 +374,15 @@ export function parseInput(raw: unknown): SentinelInput {
     ignore_attributes: parsed.ignore_attributes ?? [],
     ignore_regexes,
     ignore_regex_presets,
+    allow_localhost: parsed.allow_localhost ?? false,
+    notify_on_no_change: parsed.notify_on_no_change ?? false,
+    notify_on_fetch_failure: parsed.notify_on_fetch_failure ?? false,
+    fetch_failure_debounce_secs: parsed.fetch_failure_debounce_secs ?? 3600,
+    webhook_circuit_breaker_enabled: parsed.webhook_circuit_breaker_enabled ?? false,
+    webhook_circuit_failure_threshold: parsed.webhook_circuit_failure_threshold ?? 5,
+    webhook_circuit_cooldown_secs: parsed.webhook_circuit_cooldown_secs ?? 3600,
     redact_logs: parsed.redact_logs ?? true,
     debug: parsed.debug ?? false,
+    structured_logs: parsed.structured_logs ?? false,
   };
 }

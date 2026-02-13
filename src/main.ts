@@ -3,17 +3,30 @@ import type { Dataset, KeyValueStore } from 'apify';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { parseInput } from './input.js';
-import { buildSnapshot, EmptySnapshotError } from './snapshot.js';
+import { buildSnapshot, EmptySnapshotError, HttpError } from './snapshot.js';
 import { approxChangeRatio, computeTextChange } from './diff.js';
 import { diffJson } from './json_diff.js';
 import { makeStateKeyV1, makeStateKeyV2 } from './state.js';
 import { sendWebhook, WebhookDeliveryError } from './webhook.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { redactText, redactUrl, truncate } from './redact.js';
-import { computeEventId } from './event_id.js';
+import { computeEventId, computeRunScopedEventId } from './event_id.js';
 import { limitPayloadBytes } from './payload_limit.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
-import type { ChangePayload, SentinelInput, Snapshot, TargetInput } from './types.js';
+import { makeUnifiedTextPatch } from './unified_diff.js';
+import { decodeStoredSnapshot, encodeSnapshotForStore } from './stored_snapshot.js';
+import { appendSnapshotHistory } from './snapshot_history.js';
+import { makeArtifactKey, putJsonArtifact } from './artifacts.js';
+import { captureAndStoreBaselineScreenshot, captureAndStoreChangeScreenshots, updateBaselineScreenshot } from './screenshot_mode.js';
+import {
+  isCircuitOpen,
+  metaKeyForStateKey,
+  recordRunMeta,
+  recordWebhookFailure,
+  recordWebhookSuccess,
+  type TargetMeta,
+} from './meta.js';
+import type { ChangePayload, FetchFailedPayload, NoChangePayload, SentinelInput, Snapshot, TargetInput, WebhookPayload } from './types.js';
 
 function toError(err: unknown): Error {
   if (err instanceof Error) return err;
@@ -41,6 +54,21 @@ function safeUrl(rawUrl: string, redact: boolean): string {
   return redact ? redactUrl(rawUrl) : rawUrl;
 }
 
+function safeUrls(urls: string[], redact: boolean): string[] {
+  return urls.map((u) => safeUrl(u, redact));
+}
+
+function safeSnapshot(snapshot: Snapshot, redact: boolean): Snapshot {
+  if (!redact) return snapshot;
+  return {
+    ...snapshot,
+    url: redactUrl(snapshot.url),
+    finalUrl: snapshot.finalUrl ? redactUrl(snapshot.finalUrl) : undefined,
+    text: redactText(snapshot.text),
+    html: snapshot.html ? redactText(snapshot.html) : undefined,
+  };
+}
+
 type TargetRunResult = {
   target_url: string;
   stateKey: string;
@@ -53,8 +81,12 @@ type TargetRunResult = {
     | 'EMPTY_SNAPSHOT_IGNORED'
     | 'EMPTY_SNAPSHOT_ERROR'
     | 'WEBHOOK_FAILED'
+    | 'WEBHOOK_SKIPPED_CIRCUIT_OPEN'
     | 'BASELINE_RESET'
     | 'TARGET_FAILED';
+  durationMs?: number;
+  fetch?: ReturnType<typeof snapshotFetchMetrics>;
+  webhook?: Awaited<ReturnType<typeof sendWebhook>> | null;
 };
 
 function materializeTargetInput(base: SentinelInput, target: TargetInput): SentinelInput {
@@ -161,6 +193,36 @@ function computeJsonChangeFromSnapshotText(
   return diffs.length > 0 ? { diffs } : null;
 }
 
+function buildHumanSummary(changes: NonNullable<ChangePayload['changes']>): string {
+  if (changes.fields) {
+    const entries = Object.entries(changes.fields);
+    const parts = entries
+      .slice(0, 10)
+      .map(([k, v]) => (typeof v.delta === 'number' ? `${k}: ${v.old} -> ${v.new} (delta ${v.delta})` : `${k}: ${v.old} -> ${v.new}`));
+    const more = entries.length > 10 ? `; ... (+${entries.length - 10} more)` : '';
+    return `Fields changed: ${parts.join('; ')}${more}`;
+  }
+
+  if (changes.json) {
+    const diffs = changes.json.diffs;
+    const parts = diffs
+      .slice(0, 10)
+      .map((d) => `${d.op} ${d.path}`)
+      .join('; ');
+    const more = diffs.length > 10 ? `; ... (+${diffs.length - 10} more)` : '';
+    return `JSON changed: ${parts}${more}`;
+  }
+
+  const t = changes.text;
+  if (!t) return 'Change detected';
+  if (t.old.length <= 64 && t.new.length <= 64) {
+    if (typeof t.delta === 'number') return `Value changed: ${t.old} -> ${t.new} (delta ${t.delta})`;
+    return `Text changed: ${t.old} -> ${t.new}`;
+  }
+
+  return `Text changed (len ${t.old.length} -> ${t.new.length})`;
+}
+
 function snapshotFetchMetrics(snapshot: Snapshot, redact: boolean): {
   statusCode: number;
   finalUrl?: string;
@@ -185,7 +247,7 @@ function toSafeError(
   err: unknown,
   redact: boolean,
 ): { name: string; message: string; statusCode?: number; attempts?: number; durationMs?: number } {
-  const statusCode = err instanceof WebhookDeliveryError ? err.statusCode : undefined;
+  const statusCode = err instanceof WebhookDeliveryError ? err.statusCode : err instanceof HttpError ? err.statusCode : undefined;
   const attempts = err instanceof WebhookDeliveryError ? err.attempts : undefined;
   const durationMs = err instanceof WebhookDeliveryError ? err.durationMs : undefined;
   const e = toError(err);
@@ -193,38 +255,40 @@ function toSafeError(
   return { name: e.name, message, statusCode, attempts, durationMs };
 }
 
-function buildDeadLetterPayloadPreview(payload: ChangePayload, redact: boolean): { payload: ChangePayload; truncated: boolean } {
-  const out: ChangePayload = {
+function buildDeadLetterPayloadPreview(payload: WebhookPayload, redact: boolean): { payload: WebhookPayload; truncated: boolean } {
+  const out: WebhookPayload = {
     ...payload,
     url: safeUrl(payload.url, redact),
   };
 
+  if (payload.event !== 'CHANGE_DETECTED' && payload.event !== 'BASELINE_STORED') return { payload: out, truncated: false };
   const textChange = payload.changes?.text;
   if (!textChange) return { payload: out, truncated: false };
 
   const oldT = truncate(textChange.old, 5_000);
   const newT = truncate(textChange.new, 5_000);
-  return {
-    payload: {
-      ...out,
-      changes: {
-        ...payload.changes,
-        text: {
-          ...textChange,
-          old: oldT.text,
-          new: newT.text,
-        },
+  const outChange: ChangePayload = {
+    ...(out as ChangePayload),
+    changes: {
+      ...payload.changes,
+      text: {
+        ...textChange,
+        old: oldT.text,
+        new: newT.text,
       },
     },
+  };
+  return {
+    payload: outChange,
     truncated: oldT.truncated || newT.truncated,
   };
 }
 
 async function processTarget(
   input: SentinelInput,
-  deps: { kv: KeyValueStore; history: Dataset | null; dead: Dataset },
+  deps: { kv: KeyValueStore; history: Dataset | null; dead: Dataset; artifacts: KeyValueStore | null },
 ): Promise<TargetRunResult> {
-  const { kv, history, dead } = deps;
+  const { kv, history, dead, artifacts } = deps;
 
 	  const stateKeyV2 = makeStateKeyV2({
 	    targetUrl: input.target_url,
@@ -234,6 +298,14 @@ async function processTarget(
 	    waitForSelector: input.wait_for_selector,
 	    waitForSelectorTimeoutSecs: input.wait_for_selector_timeout_secs,
 	    fetchHeaders: input.fetch_headers,
+	    targetMethod: input.target_method,
+	    targetBody: input.target_body,
+	    targetCookies: input.target_cookies,
+	    robotsTxtMode: input.robots_txt_mode,
+	    blockPageRegexes: input.block_page_regexes,
+	    selectorAggregationMode: input.selector_aggregation_mode,
+	    whitespaceMode: input.whitespace_mode,
+	    unicodeNormalization: input.unicode_normalization,
 	    fields: input.fields,
 	    ignoreJsonPaths: input.ignore_json_paths,
 	    ignoreSelectors: input.ignore_selectors,
@@ -242,6 +314,31 @@ async function processTarget(
 	  });
   const stateKeyV1 = makeStateKeyV1(input.target_url, input.selector);
   const stateKey = stateKeyV2;
+  const startedTargetAt = Date.now();
+
+  const metaKey = metaKeyForStateKey(stateKey);
+  let meta = ((await kv.getValue<TargetMeta>(metaKey)) ?? null) as TargetMeta | null;
+
+  async function finish(outcome: TargetRunResult['outcome'], extra: Partial<TargetRunResult> = {}): Promise<TargetRunResult> {
+    const durationMs = Date.now() - startedTargetAt;
+    meta = recordRunMeta(meta, outcome);
+    await kv.setValue(metaKey, meta);
+    if (input.structured_logs) {
+      // Single-line JSON for log aggregation tools.
+      console.log(
+        JSON.stringify({
+          event: 'TARGET_RESULT',
+          timestamp: new Date().toISOString(),
+          stateKey,
+          target_url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          outcome,
+          durationMs,
+        }),
+      );
+    }
+    return { target_url: input.target_url, stateKey, outcome, durationMs, ...extra };
+  }
 
   async function pushHistory(item: Record<string, unknown>): Promise<void> {
     if (!history) return;
@@ -251,14 +348,18 @@ async function processTarget(
 
   try {
     // Fail fast on unsafe target URL (SSRF protection).
-    await assertSafeHttpUrl(input.target_url, 'target_url');
+    await assertSafeHttpUrl(input.target_url, 'target_url', {
+      allowLocalhost: input.allow_localhost && !(Actor.getEnv().isAtHome ?? false),
+    });
     assertUrlAllowedByDomainPolicy(input.target_url, 'target_url', {
       allowlist: input.target_domain_allowlist,
       denylist: input.target_domain_denylist,
     });
 
-    const storedPreviousV2 = (await kv.getValue<Snapshot>(stateKeyV2)) ?? null;
-    const storedPreviousV1 = storedPreviousV2 ? null : ((await kv.getValue<Snapshot>(stateKeyV1)) ?? null);
+    const storedPreviousV2Raw = (await kv.getValue<unknown>(stateKeyV2)) ?? null;
+    const storedPreviousV2 = storedPreviousV2Raw ? decodeStoredSnapshot(storedPreviousV2Raw) : null;
+    const storedPreviousV1Raw = storedPreviousV2 ? null : ((await kv.getValue<unknown>(stateKeyV1)) ?? null);
+    const storedPreviousV1 = storedPreviousV1Raw ? decodeStoredSnapshot(storedPreviousV1Raw) : null;
     const storedPrevious = storedPreviousV2 ?? storedPreviousV1;
     const migratedFromV1 = !!storedPreviousV1;
     const previous = input.reset_baseline ? null : storedPrevious;
@@ -332,7 +433,7 @@ async function processTarget(
             minTextLength: err.minTextLength,
           });
         }
-        return { target_url: input.target_url, stateKey, outcome: 'EMPTY_SNAPSHOT_IGNORED' };
+        return await finish('EMPTY_SNAPSHOT_IGNORED');
       }
 
       log.exception(e, 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
@@ -356,11 +457,84 @@ async function processTarget(
           selector: input.selector,
         });
       }
-      return { target_url: input.target_url, stateKey, outcome: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED' };
+
+      if (input.notify_on_fetch_failure) {
+        const safeErr = toSafeError(err, input.redact_logs);
+        const signature = `${safeErr.name}:${safeErr.statusCode ?? ''}:${safeErr.message.slice(0, 200)}`;
+
+        const now = new Date();
+        const lastAtMs = meta?.last_fetch_failure_notified_at ? Date.parse(meta.last_fetch_failure_notified_at) : NaN;
+        const withinDebounce =
+          Number.isFinite(lastAtMs) && now.getTime() - lastAtMs < Math.max(0, input.fetch_failure_debounce_secs) * 1000;
+
+        if (!(withinDebounce && meta?.last_fetch_failure_signature === signature)) {
+          if (input.webhook_circuit_breaker_enabled && isCircuitOpen(meta, now)) {
+            log.warning('Fetch failure notification skipped (webhook circuit open).', { stateKey });
+          } else {
+            const runId = Actor.getEnv().actorRunId ?? 'local';
+            const payloadBase: FetchFailedPayload = {
+              schema_version: 1,
+              event_id: computeRunScopedEventId({
+                event: 'FETCH_FAILED',
+                runId,
+                url: input.target_url,
+                selector: input.selector,
+                signature,
+              }),
+              event: 'FETCH_FAILED',
+              url: input.target_url,
+              selector: input.selector,
+              timestamp,
+              previous: previous ? { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt } : undefined,
+              error: safeErr,
+            };
+
+            const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+
+            try {
+              const delivery = await sendWebhook(input, payload);
+              meta = recordWebhookSuccess(meta);
+              meta = { ...(meta ?? {}), last_fetch_failure_notified_at: now.toISOString(), last_fetch_failure_signature: signature };
+              log.info('Fetch failure notification webhook delivered.', { stateKey, ...delivery });
+            } catch (notifyErr) {
+              const recorded = recordWebhookFailure(meta, notifyErr, {
+                threshold: input.webhook_circuit_failure_threshold,
+                cooldownSecs: input.webhook_circuit_cooldown_secs,
+                now,
+              });
+              meta = recorded.meta;
+              const notifySafeErr = toSafeError(notifyErr, input.redact_logs);
+              log.error('Fetch failure notification webhook failed.', { stateKey, error: notifySafeErr });
+            }
+          }
+        } else {
+          log.info('Fetch failure notification debounced.', { stateKey, fetch_failure_debounce_secs: input.fetch_failure_debounce_secs });
+        }
+      }
+
+      return await finish(isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED');
     }
 
+    // Clear fetch-failure debounce state after a successful snapshot.
+    if (meta?.last_fetch_failure_signature || meta?.last_fetch_failure_notified_at) {
+      meta = {
+        ...meta,
+        last_fetch_failure_signature: undefined,
+        last_fetch_failure_notified_at: undefined,
+      };
+    }
+
+    meta = {
+      ...(meta ?? {}),
+      last_success_snapshot_at: current.fetchedAt,
+      last_success_content_hash: current.contentHash,
+      last_success_status_code: current.statusCode,
+      last_success_final_url: current.finalUrl,
+    };
+
     if (!previous) {
-      await kv.setValue(stateKey, current);
+      await kv.setValue(stateKey, encodeSnapshotForStore(current, input.compress_snapshots));
+      await appendSnapshotHistory(kv, stateKey, current, input.snapshot_history_limit);
       log.info('Baseline stored (no previous snapshot).', { stateKey, contentHash: current.contentHash });
 
       const payloadBase: ChangePayload = {
@@ -387,10 +561,38 @@ async function processTarget(
         stateKey,
       });
 
+      const fetchMetrics = snapshotFetchMetrics(current, input.redact_logs);
+      let baselineDelivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
+
+      if (input.screenshot_on_change && artifacts) {
+        if (input.rendering_mode !== 'playwright') {
+          log.warning('screenshot_on_change is only supported with rendering_mode=playwright; skipping baseline screenshot.', { stateKey });
+        } else {
+          try {
+            await captureAndStoreBaselineScreenshot(input, { artifacts, stateKey });
+          } catch (err) {
+            log.warning('Failed to capture baseline screenshot.', { stateKey, error: toSafeError(err, input.redact_logs) });
+          }
+        }
+      }
+
       if (input.baseline_mode === 'notify') {
-        try {
-          const delivery = await sendWebhook(input, payload);
-          log.info('Baseline webhook sent.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+        if (input.webhook_circuit_breaker_enabled && isCircuitOpen(meta)) {
+          const timestamp = new Date().toISOString();
+          log.warning('Webhook circuit open; skipping baseline webhook delivery.', {
+            stateKey,
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+          });
+          await Actor.pushData({
+            event: 'WEBHOOK_CIRCUIT_OPEN',
+            timestamp,
+            stateKey,
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+            target_url: safeUrl(input.target_url, input.redact_logs),
+            selector: input.selector,
+            reason: 'circuit_open',
+          });
 
           await pushHistory({
             event: 'BASELINE_STORED',
@@ -402,10 +604,55 @@ async function processTarget(
             payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
             fetch: snapshotFetchMetrics(current, input.redact_logs),
             webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+            delivered: false,
+            webhook_skipped: true,
+            reason: 'circuit_open',
+          });
+
+          return await finish('BASELINE_STORED', { fetch: fetchMetrics, webhook: null });
+        }
+
+        try {
+          const delivery = await sendWebhook(input, payload);
+          baselineDelivery = delivery;
+          meta = recordWebhookSuccess(meta);
+          log.info('Baseline webhook sent.', { webhook_urls: safeUrls(input.webhook_urls, input.redact_logs), ...delivery });
+
+          await pushHistory({
+            event: 'BASELINE_STORED',
+            timestamp: payload.timestamp,
+            event_id: payload.event_id,
+            stateKey,
+            url: safeUrl(payload.url, input.redact_logs),
+            selector: payload.selector,
+            payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
             delivered: true,
             delivery,
           });
         } catch (err) {
+          const recorded = recordWebhookFailure(meta, err, {
+            threshold: input.webhook_circuit_failure_threshold,
+            cooldownSecs: input.webhook_circuit_cooldown_secs,
+          });
+          meta = recorded.meta;
+          if (input.webhook_circuit_breaker_enabled && recorded.tripped) {
+            await Actor.pushData({
+              event: 'WEBHOOK_CIRCUIT_TRIPPED',
+              timestamp: new Date().toISOString(),
+              stateKey,
+              webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+              webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+              target_url: safeUrl(input.target_url, input.redact_logs),
+              selector: input.selector,
+              webhook_circuit_open_until: meta.webhook_circuit_open_until,
+              webhook_consecutive_failures: meta.webhook_consecutive_failures,
+            });
+          }
+
           const safeErr = toSafeError(err, input.redact_logs);
           const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
           await dead.pushData({
@@ -413,6 +660,7 @@ async function processTarget(
             timestamp: new Date().toISOString(),
             stateKey,
             webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
             target_url: safeUrl(input.target_url, input.redact_logs),
             selector: input.selector,
             fetch: snapshotFetchMetrics(current, input.redact_logs),
@@ -426,6 +674,7 @@ async function processTarget(
             timestamp: new Date().toISOString(),
             stateKey,
             webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
             target_url: safeUrl(input.target_url, input.redact_logs),
             selector: input.selector,
             fetch: snapshotFetchMetrics(current, input.redact_logs),
@@ -434,6 +683,7 @@ async function processTarget(
 
           log.error('Baseline webhook delivery failed (stored in dead-letter dataset).', {
             webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
             dead_letter_dataset_name: input.dead_letter_dataset_name,
             error: safeErr,
           });
@@ -448,11 +698,12 @@ async function processTarget(
             payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
             fetch: snapshotFetchMetrics(current, input.redact_logs),
             webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
             delivered: false,
             error: safeErr,
           });
 
-          return { target_url: input.target_url, stateKey, outcome: 'WEBHOOK_FAILED' };
+          return await finish('WEBHOOK_FAILED', { fetch: fetchMetrics, webhook: null });
         }
       } else if (input.history_mode === 'all_events') {
         await pushHistory({
@@ -470,12 +721,14 @@ async function processTarget(
         });
       }
 
-      return { target_url: input.target_url, stateKey, outcome: 'BASELINE_STORED' };
+      return await finish('BASELINE_STORED', { fetch: fetchMetrics, webhook: baselineDelivery });
     }
 
     const change = computeTextChange(previous, current);
     if (!change) {
       log.info('No change detected.', { stateKey, contentHash: current.contentHash });
+      const fetchMetrics = snapshotFetchMetrics(current, input.redact_logs);
+      let noChangeDelivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
       await Actor.pushData({
         event: 'NO_CHANGE',
         url: safeUrl(input.target_url, input.redact_logs),
@@ -483,7 +736,7 @@ async function processTarget(
         timestamp: new Date().toISOString(),
         previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
         current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        fetch: fetchMetrics,
         stateKey,
       });
 
@@ -496,13 +749,56 @@ async function processTarget(
           selector: input.selector,
           previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
           current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-          fetch: snapshotFetchMetrics(current, input.redact_logs),
+          fetch: fetchMetrics,
         });
       }
 
+      if (input.notify_on_no_change) {
+        const now = new Date();
+        if (input.webhook_circuit_breaker_enabled && isCircuitOpen(meta, now)) {
+          log.warning('No-change notification skipped (webhook circuit open).', { stateKey });
+        } else {
+          const runId = Actor.getEnv().actorRunId ?? 'local';
+          const payloadBase: NoChangePayload = {
+            schema_version: 1,
+            event_id: computeRunScopedEventId({
+              event: 'NO_CHANGE',
+              runId,
+              url: input.target_url,
+              selector: input.selector,
+              currentHash: current.contentHash,
+            }),
+            event: 'NO_CHANGE',
+            url: input.target_url,
+            selector: input.selector,
+            timestamp: new Date().toISOString(),
+            previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+            current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+          };
+
+          const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+          try {
+            const delivery = await sendWebhook(input, payload);
+            noChangeDelivery = delivery;
+            meta = recordWebhookSuccess(meta);
+            meta = { ...(meta ?? {}), last_no_change_notified_at: now.toISOString() };
+            log.info('No-change notification webhook delivered.', { stateKey, ...delivery });
+          } catch (notifyErr) {
+            const recorded = recordWebhookFailure(meta, notifyErr, {
+              threshold: input.webhook_circuit_failure_threshold,
+              cooldownSecs: input.webhook_circuit_cooldown_secs,
+              now,
+            });
+            meta = recorded.meta;
+            const notifySafeErr = toSafeError(notifyErr, input.redact_logs);
+            log.error('No-change notification webhook failed.', { stateKey, error: notifySafeErr });
+          }
+        }
+      }
+
       // Refresh baseline metadata (timestamps/headers) even if content is unchanged.
-      await kv.setValue(stateKey, current);
-      return { target_url: input.target_url, stateKey, outcome: 'NO_CHANGE' };
+      await kv.setValue(stateKey, encodeSnapshotForStore(current, input.compress_snapshots));
+      return await finish('NO_CHANGE', { fetch: fetchMetrics, webhook: noChangeDelivery });
     }
 
     if (input.min_change_ratio > 0) {
@@ -537,16 +833,34 @@ async function processTarget(
           });
         }
 
+        if (input.screenshot_on_change && artifacts) {
+          if (input.rendering_mode !== 'playwright') {
+            log.warning('screenshot_on_change is only supported with rendering_mode=playwright; skipping baseline screenshot update.', {
+              stateKey,
+            });
+          } else {
+            try {
+              await captureAndStoreBaselineScreenshot(input, { artifacts, stateKey });
+            } catch (err) {
+              log.warning('Failed to update baseline screenshot on suppressed change.', {
+                stateKey,
+                error: toSafeError(err, input.redact_logs),
+              });
+            }
+          }
+        }
+
         // Suppress alert but still advance baseline to avoid repeated detections.
-        await kv.setValue(stateKey, current);
-        return { target_url: input.target_url, stateKey, outcome: 'CHANGE_SUPPRESSED' };
+        await kv.setValue(stateKey, encodeSnapshotForStore(current, input.compress_snapshots));
+        await appendSnapshotHistory(kv, stateKey, current, input.snapshot_history_limit);
+        return await finish('CHANGE_SUPPRESSED', { fetch: snapshotFetchMetrics(current, input.redact_logs), webhook: null });
       }
     }
 
-    const payloadBase: ChangePayload = {
-      schema_version: 1,
-      event_id: computeEventId({
-        event: 'CHANGE_DETECTED',
+	    const payloadBase: ChangePayload = {
+	      schema_version: 1,
+	      event_id: computeEventId({
+	        event: 'CHANGE_DETECTED',
         url: input.target_url,
         selector: input.selector,
         previousHash: previous.contentHash,
@@ -569,16 +883,48 @@ async function processTarget(
 
         return out;
       })(),
-      previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-      current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-    };
+	      previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+	      current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+	    };
 
-    const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+		    const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+		    if (payload.event === 'CHANGE_DETECTED' && payload.changes) {
+		      (payload as ChangePayload).summary = buildHumanSummary(payload.changes);
 
-    let delivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
-    try {
-      delivery = await sendWebhook(input, payload);
-      log.info('Change detected; webhook delivered.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+	      if (input.include_unified_diff && payload.changes.text) {
+	        const { patch, truncated } = makeUnifiedTextPatch(payload.changes.text.old, payload.changes.text.new, {
+	          contextLines: input.unified_diff_context_lines,
+	          maxChars: input.unified_diff_max_chars,
+	        });
+	        payload.changes.text.patch = patch;
+	        if (truncated) payload.changes.text.patch_truncated = true;
+
+	        const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+	        if (bytes > input.max_payload_bytes) {
+	          // Patch is optional; drop it rather than failing the webhook.
+	          payload.changes.text.patch = undefined;
+	          payload.changes.text.patch_truncated = undefined;
+	        }
+		      }
+		    }
+
+		    let delivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
+		    if (input.webhook_circuit_breaker_enabled && isCircuitOpen(meta)) {
+	      const timestamp = new Date().toISOString();
+	      log.warning('Webhook circuit open; skipping delivery. Baseline NOT updated.', {
+	        stateKey,
+	        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+	      });
+      await Actor.pushData({
+        event: 'WEBHOOK_CIRCUIT_OPEN',
+        timestamp,
+        stateKey,
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+        target_url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        reason: 'circuit_open',
+      });
 
       await pushHistory({
         event: 'CHANGE_DETECTED',
@@ -590,10 +936,100 @@ async function processTarget(
         payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
         fetch: snapshotFetchMetrics(current, input.redact_logs),
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+        delivered: false,
+        webhook_skipped: true,
+        reason: 'circuit_open',
+      });
+
+	      return await finish('WEBHOOK_SKIPPED_CIRCUIT_OPEN', { fetch: snapshotFetchMetrics(current, input.redact_logs), webhook: null });
+	    }
+
+		    if (payload.event === 'CHANGE_DETECTED' && input.store_debug_artifacts && artifacts) {
+		      try {
+		        const prevKey = makeArtifactKey({ stateKey, eventId: payload.event_id, name: 'previous_snapshot.json' });
+		        const currKey = makeArtifactKey({ stateKey, eventId: payload.event_id, name: 'current_snapshot.json' });
+		        const prevRef = await putJsonArtifact(
+		          artifacts,
+		          input.artifact_store_name,
+		          prevKey,
+		          safeSnapshot(previous, input.redact_logs),
+		        );
+		        const currRef = await putJsonArtifact(
+		          artifacts,
+		          input.artifact_store_name,
+		          currKey,
+		          safeSnapshot(current, input.redact_logs),
+		        );
+
+		        (payload as ChangePayload).artifacts = {
+		          ...(payload as ChangePayload).artifacts,
+		          debug: { previous_snapshot: prevRef, current_snapshot: currRef },
+		        };
+		      } catch (err) {
+		        log.warning('Failed to store debug artifacts.', { stateKey, error: toSafeError(err, input.redact_logs) });
+		      }
+		    }
+
+		    let afterScreenshotPng: Buffer | null = null;
+		    if (payload.event === 'CHANGE_DETECTED' && input.screenshot_on_change && artifacts) {
+		      if (input.rendering_mode !== 'playwright') {
+		        log.warning('screenshot_on_change is only supported with rendering_mode=playwright; skipping screenshots.', { stateKey });
+		      } else {
+		        try {
+		          const res = await captureAndStoreChangeScreenshots(input, { artifacts, stateKey, eventId: payload.event_id });
+		          if (res) {
+		            afterScreenshotPng = res.afterPng;
+		            (payload as ChangePayload).artifacts = {
+		              ...(payload as ChangePayload).artifacts,
+		              screenshots: res.screenshots,
+		            };
+		          }
+		        } catch (err) {
+		          log.warning('Failed to capture/store screenshots.', { stateKey, error: toSafeError(err, input.redact_logs) });
+		        }
+		      }
+		    }
+
+	    try {
+	      delivery = await sendWebhook(input, payload);
+	      meta = recordWebhookSuccess(meta);
+	      log.info('Change detected; webhook delivered.', { webhook_urls: safeUrls(input.webhook_urls, input.redact_logs), ...delivery });
+
+      await pushHistory({
+        event: 'CHANGE_DETECTED',
+        timestamp: payload.timestamp,
+        event_id: payload.event_id,
+        stateKey,
+        url: safeUrl(payload.url, input.redact_logs),
+        selector: payload.selector,
+        payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
         delivered: true,
         delivery,
       });
     } catch (err) {
+      const recorded = recordWebhookFailure(meta, err, {
+        threshold: input.webhook_circuit_failure_threshold,
+        cooldownSecs: input.webhook_circuit_cooldown_secs,
+      });
+      meta = recorded.meta;
+      if (input.webhook_circuit_breaker_enabled && recorded.tripped) {
+        await Actor.pushData({
+          event: 'WEBHOOK_CIRCUIT_TRIPPED',
+          timestamp: new Date().toISOString(),
+          stateKey,
+          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+          webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
+          target_url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          webhook_circuit_open_until: meta.webhook_circuit_open_until,
+          webhook_consecutive_failures: meta.webhook_consecutive_failures,
+        });
+      }
+
       const safeErr = toSafeError(err, input.redact_logs);
       const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
       await dead.pushData({
@@ -601,6 +1037,7 @@ async function processTarget(
         timestamp: new Date().toISOString(),
         stateKey,
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
         target_url: safeUrl(input.target_url, input.redact_logs),
         selector: input.selector,
         fetch: snapshotFetchMetrics(current, input.redact_logs),
@@ -614,6 +1051,7 @@ async function processTarget(
         timestamp: new Date().toISOString(),
         stateKey,
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
         target_url: safeUrl(input.target_url, input.redact_logs),
         selector: input.selector,
         fetch: snapshotFetchMetrics(current, input.redact_logs),
@@ -622,6 +1060,7 @@ async function processTarget(
 
       log.error('Change detected but webhook delivery failed. Baseline NOT updated (will retry next run).', {
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
         dead_letter_dataset_name: input.dead_letter_dataset_name,
         error: safeErr,
       });
@@ -636,23 +1075,32 @@ async function processTarget(
         payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
         fetch: snapshotFetchMetrics(current, input.redact_logs),
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        webhook_urls: safeUrls(input.webhook_urls, input.redact_logs),
         delivered: false,
         error: safeErr,
       });
 
-      return { target_url: input.target_url, stateKey, outcome: 'WEBHOOK_FAILED' };
+      return await finish('WEBHOOK_FAILED', { fetch: snapshotFetchMetrics(current, input.redact_logs), webhook: null });
     }
 
-    await kv.setValue(stateKey, current);
-    await Actor.pushData({
-      ...payload,
-      url: safeUrl(payload.url, input.redact_logs),
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
+	    await kv.setValue(stateKey, encodeSnapshotForStore(current, input.compress_snapshots));
+	    await appendSnapshotHistory(kv, stateKey, current, input.snapshot_history_limit);
+	    if (afterScreenshotPng && artifacts) {
+	      try {
+	        await updateBaselineScreenshot(input, { artifacts, stateKey, png: afterScreenshotPng });
+	      } catch (err) {
+	        log.warning('Failed to update baseline screenshot after change.', { stateKey, error: toSafeError(err, input.redact_logs) });
+	      }
+	    }
+	    await Actor.pushData({
+	      ...payload,
+	      url: safeUrl(payload.url, input.redact_logs),
+	      fetch: snapshotFetchMetrics(current, input.redact_logs),
       webhook: delivery,
       stateKey,
     });
 
-    return { target_url: input.target_url, stateKey, outcome: 'CHANGE_DETECTED' };
+    return await finish('CHANGE_DETECTED', { fetch: snapshotFetchMetrics(current, input.redact_logs), webhook: delivery });
   } catch (err) {
     const safeErr = toSafeError(err, input.redact_logs);
     log.exception(toError(err), 'Target processing failed.');
@@ -674,7 +1122,7 @@ async function processTarget(
         error: safeErr,
       });
     }
-    return { target_url: input.target_url, stateKey, outcome: 'TARGET_FAILED' };
+    return await finish('TARGET_FAILED');
   }
 }
 
@@ -700,14 +1148,13 @@ async function replayDeadLetters(input: SentinelInput, deps: { history: Dataset 
     return !!value && typeof value === 'object' && !Array.isArray(value);
   }
 
-  function isChangePayload(value: unknown): value is ChangePayload {
+  function isWebhookPayload(value: unknown): value is WebhookPayload {
     if (!isRecord(value)) return false;
     if (value.schema_version !== 1) return false;
     if (typeof value.event_id !== 'string' || value.event_id.length === 0) return false;
     if (typeof value.event !== 'string' || value.event.length === 0) return false;
     if (typeof value.url !== 'string' || value.url.length === 0) return false;
     if (typeof value.timestamp !== 'string' || value.timestamp.length === 0) return false;
-    if (!isRecord(value.current)) return false;
     return true;
   }
 
@@ -722,7 +1169,7 @@ async function replayDeadLetters(input: SentinelInput, deps: { history: Dataset 
     }
 
     const payloadRaw = item.payload;
-    if (!isChangePayload(payloadRaw)) {
+    if (!isWebhookPayload(payloadRaw)) {
       await Actor.pushData({
         event: 'DEAD_LETTER_REPLAY_SKIPPED',
         timestamp: new Date().toISOString(),
@@ -738,7 +1185,7 @@ async function replayDeadLetters(input: SentinelInput, deps: { history: Dataset 
         ? storedWebhookUrl
         : input.webhook_url;
 
-    const replayInput: SentinelInput = { ...input, webhook_url: webhookUrl };
+    const replayInput: SentinelInput = { ...input, webhook_url: webhookUrl, webhook_urls: [webhookUrl] };
 
     if (input.replay_dry_run) {
       await Actor.pushData({
@@ -833,12 +1280,29 @@ await Actor.main(async () => {
   const input = parseInput(raw);
   log.setLevel(input.debug ? log.LEVELS.DEBUG : log.LEVELS.INFO);
 
-  // Fail fast on unsafe webhook URL (SSRF protection).
-  await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
-  assertUrlAllowedByDomainPolicy(input.webhook_url, 'webhook_url', {
-    allowlist: input.webhook_domain_allowlist,
-    denylist: input.webhook_domain_denylist,
-  });
+  const allowLocalhost = input.allow_localhost && !(Actor.getEnv().isAtHome ?? false);
+  if (input.allow_localhost && !allowLocalhost) {
+    log.warning('allow_localhost is ignored when running on the Apify platform.', {});
+  }
+
+  if (input.mode === 'monitor' && input.schedule_jitter_ms > 0) {
+    const jitter = Math.floor(Math.random() * (input.schedule_jitter_ms + 1));
+    if (jitter > 0) {
+      log.info('Applying schedule jitter delay.', { jitter_ms: jitter });
+      await new Promise<void>((resolve) => setTimeout(resolve, jitter));
+    }
+  }
+
+  if (input.mode === 'monitor') {
+    // Fail fast on unsafe webhook URLs (SSRF protection).
+    for (const url of input.webhook_urls) {
+      await assertSafeHttpUrl(url, 'webhook_url', { allowLocalhost });
+      assertUrlAllowedByDomainPolicy(url, 'webhook_url', {
+        allowlist: input.webhook_domain_allowlist,
+        denylist: input.webhook_domain_denylist,
+      });
+    }
+  }
 
   const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
   const dead = await Actor.openDataset(input.dead_letter_dataset_name);
@@ -853,31 +1317,76 @@ await Actor.main(async () => {
   }
 
   const kv = await Actor.openKeyValueStore(input.state_store_name);
+  const needArtifacts = input.store_debug_artifacts || input.screenshot_on_change;
+  const artifactStore = needArtifacts ? await Actor.openKeyValueStore(input.artifact_store_name) : null;
 
   const targetInputs = input.targets.map((t) => materializeTargetInput(input, t));
   log.info('Processing targets.', { targets: targetInputs.length, max_concurrency: input.max_concurrency });
 
+  const runStartedAt = Date.now();
   const results = await mapWithConcurrency(targetInputs, input.max_concurrency, async (ti) =>
-    processTarget(ti, { kv, history, dead }),
+    processTarget(ti, { kv, history, dead, artifacts: artifactStore }),
   );
+  const runDurationMs = Date.now() - runStartedAt;
 
   const counts: Record<string, number> = {};
   for (const r of results) {
     counts[r.outcome] = (counts[r.outcome] ?? 0) + 1;
   }
 
+  const targetDurations = results.map((r) => r.durationMs).filter((n): n is number => typeof n === 'number');
+  const targets_total_duration_ms = targetDurations.reduce((a, b) => a + b, 0);
+
+  const fetchDurations = results.map((r) => r.fetch?.durationMs).filter((n): n is number => typeof n === 'number');
+  const fetch_total_duration_ms = fetchDurations.reduce((a, b) => a + b, 0);
+  const fetch_total_bytes_read = results
+    .map((r) => r.fetch?.bytesRead)
+    .filter((n): n is number => typeof n === 'number')
+    .reduce((a, b) => a + b, 0);
+  const fetch_total_attempts = results
+    .map((r) => r.fetch?.attempts)
+    .filter((n): n is number => typeof n === 'number')
+    .reduce((a, b) => a + b, 0);
+  const fetch_retried_targets = results.filter((r) => typeof r.fetch?.attempts === 'number' && (r.fetch?.attempts ?? 0) > 1)
+    .length;
+
+  const webhook_total_duration_ms = results
+    .map((r) => r.webhook?.durationMs)
+    .filter((n): n is number => typeof n === 'number')
+    .reduce((a, b) => a + b, 0);
+  const webhook_total_attempts = results
+    .map((r) => r.webhook?.attempts)
+    .filter((n): n is number => typeof n === 'number')
+    .reduce((a, b) => a + b, 0);
+  const webhook_deliveries_total = results.reduce((sum, r) => sum + (r.webhook?.deliveries?.length ?? 0), 0);
+
   const timestamp = new Date().toISOString();
   await Actor.pushData({
     event: 'RUN_SUMMARY',
     timestamp,
+    run_duration_ms: runDurationMs,
     targets_total: results.length,
+    targets_total_duration_ms,
     outcomes: counts,
+    fetch: {
+      total_duration_ms: fetch_total_duration_ms,
+      avg_duration_ms: fetchDurations.length > 0 ? Math.round(fetch_total_duration_ms / fetchDurations.length) : 0,
+      total_bytes_read: fetch_total_bytes_read,
+      total_attempts: fetch_total_attempts,
+      retried_targets: fetch_retried_targets,
+    },
+    webhook: {
+      total_duration_ms: webhook_total_duration_ms,
+      total_attempts: webhook_total_attempts,
+      deliveries_total: webhook_deliveries_total,
+    },
     failures: results
       .filter(
         (r) =>
           r.outcome === 'FETCH_FAILED' ||
           r.outcome === 'EMPTY_SNAPSHOT_ERROR' ||
           r.outcome === 'WEBHOOK_FAILED' ||
+          r.outcome === 'WEBHOOK_SKIPPED_CIRCUIT_OPEN' ||
           r.outcome === 'TARGET_FAILED',
       )
       .map((r) => ({
@@ -886,6 +1395,18 @@ await Actor.main(async () => {
         outcome: r.outcome,
       })),
   });
+
+  if (input.structured_logs) {
+    console.log(
+      JSON.stringify({
+        event: 'RUN_SUMMARY',
+        timestamp,
+        run_duration_ms: runDurationMs,
+        targets_total: results.length,
+        outcomes: counts,
+      }),
+    );
+  }
 
   if (history && input.history_mode === 'all_events') {
     await history.pushData({

@@ -22,3 +22,26 @@ export function computeEventId(input: EventIdInput): string {
   return sha256Hex(stable);
 }
 
+export type RunScopedEventIdInput = {
+  event: 'NO_CHANGE' | 'FETCH_FAILED';
+  runId: string;
+  url: string;
+  selector?: string;
+  currentHash?: string;
+  signature?: string;
+};
+
+export function computeRunScopedEventId(input: RunScopedEventIdInput): string {
+  // Unique per run (or per debounced emission), but stable across webhook retries.
+  const stable = JSON.stringify({
+    v: 2,
+    event: input.event,
+    runId: input.runId,
+    url: input.url,
+    selector: input.selector ?? null,
+    currentHash: input.currentHash ?? null,
+    signature: input.signature ?? null,
+  });
+
+  return sha256Hex(stable);
+}

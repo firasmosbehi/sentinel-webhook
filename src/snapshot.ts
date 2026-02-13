@@ -9,6 +9,7 @@ import { assertSafeHttpUrl } from './url_safety.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
 import { normalizeHttpUrl } from './url_normalize.js';
 import { waitForPoliteness } from './politeness.js';
+import { assertRobotsAllowed } from './robots.js';
 import { Actor } from 'apify';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 import type { Route } from 'playwright';
@@ -113,6 +114,46 @@ function stripHeader(headers: Record<string, string>, name: string): Record<stri
   return out;
 }
 
+function setHeaderIfAbsent(headers: Record<string, string>, name: string, value: string): void {
+  if (!hasHeader(headers, name)) {
+    headers[name] = value;
+  }
+}
+
+function buildCookieHeader(cookies: SentinelInput['target_cookies']): string {
+  // Minimal cookie header support for static fetch. Prefer Playwright context cookies for complex cases.
+  return cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+}
+
+function compileUserRegex(pattern: string): RegExp {
+  // Allow either:
+  // - plain pattern: "foo\\d+" => /foo\d+/g
+  // - slash form: "/foo\\d+/gi" => /foo\d+/gi (ensure global)
+  const slashForm = pattern.match(/^\/(.+)\/([a-zA-Z]*)$/);
+  if (slashForm) {
+    const body = slashForm[1];
+    const flagsRaw = slashForm[2] ?? '';
+    if (!body) throw new Error(`Invalid regex: ${pattern}`);
+    const flags = flagsRaw.includes('g') ? flagsRaw : `${flagsRaw}g`;
+    return new RegExp(body, flags);
+  }
+  return new RegExp(pattern, 'g');
+}
+
+function matchesAnyRegex(text: string, patterns: string[]): string | null {
+  for (const p of patterns) {
+    let re: RegExp;
+    try {
+      re = compileUserRegex(p);
+    } catch {
+      // Invalid patterns should be a hard error for predictable behavior.
+      throw new Error(`Invalid block_page_regex: ${p}`);
+    }
+    if (re.test(text)) return p;
+  }
+  return null;
+}
+
 function toPlaywrightProxy(proxyUrl: string): { server: string; username?: string; password?: string } {
   const u = new URL(proxyUrl);
   const out: { server: string; username?: string; password?: string } = { server: u.origin };
@@ -123,6 +164,13 @@ function toPlaywrightProxy(proxyUrl: string): { server: string; username?: strin
 
 export async function buildSnapshot(input: SentinelInput, previous: Snapshot | null = null): Promise<Snapshot> {
   if (input.rendering_mode === 'playwright') {
+    const method = input.target_method.toUpperCase();
+    if (method !== 'GET') {
+      throw new Error(`rendering_mode=playwright currently only supports target_method=GET (got ${method})`);
+    }
+    if (typeof input.target_body === 'string' && input.target_body.length > 0) {
+      throw new Error('rendering_mode=playwright does not support target_body (use static mode).');
+    }
     return buildSnapshotPlaywright(input, previous);
   }
 
@@ -134,6 +182,11 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     target_url,
     selector,
     fetch_headers,
+    target_method,
+    target_body,
+    target_cookies,
+    robots_txt_mode,
+    block_page_regexes,
     proxy_configuration,
     target_domain_allowlist,
     target_domain_denylist,
@@ -146,6 +199,9 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     politeness_jitter_ms,
     min_text_length,
     on_empty_snapshot,
+    selector_aggregation_mode,
+    whitespace_mode,
+    unicode_normalization,
     fields,
     ignore_json_paths,
   } = input;
@@ -157,6 +213,15 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
   const dispatcher: Dispatcher = proxyUrl
     ? new ProxyAgent({ uri: proxyUrl, connectTimeout: connectTimeoutMs })
     : new Agent({ connectTimeout: connectTimeoutMs });
+
+  const method = target_method.toUpperCase();
+  if ((method === 'GET' || method === 'HEAD') && typeof target_body === 'string' && target_body.length > 0) {
+    throw new Error(`target_body is not allowed for target_method=${method}`);
+  }
+
+  const defaultUserAgent = 'SentinelWebhook/0.1 (+https://github.com/firasmosbehi/sentinel-webhook)';
+  const userAgent = getHeader(fetch_headers, 'user-agent') ?? defaultUserAgent;
+  const allowLocalhost = input.allow_localhost && !(Actor.getEnv().isAtHome ?? false);
 
   const startedAt = Date.now();
   let attempts = 0;
@@ -174,37 +239,67 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
       async (attempt) => {
         attempts = attempt + 1;
         let currentUrl = target_url;
+        let currentMethod = method;
+        let currentBody = typeof target_body === 'string' && target_body.length > 0 ? target_body : undefined;
+        const conditionalUrl = previous?.finalUrl ?? target_url;
         for (let i = 0; i <= max_redirects; i++) {
           const redirectCount = i;
           assertUrlAllowedByDomainPolicy(currentUrl, 'target_url', {
             allowlist: target_domain_allowlist,
             denylist: target_domain_denylist,
           });
-          await assertSafeHttpUrl(currentUrl, 'target_url');
+          await assertSafeHttpUrl(currentUrl, 'target_url', { allowLocalhost });
 
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), fetch_timeout_secs * 1000);
           try {
+            if (robots_txt_mode === 'respect') {
+              await assertRobotsAllowed(currentUrl, userAgent, {
+                dispatcher,
+                timeoutSecs: Math.min(10, fetch_timeout_secs),
+                allowOnError: true,
+              });
+            }
+
             await waitForPoliteness(currentUrl, politeness_delay_ms, politeness_jitter_ms);
+
+            const headers = stripHeader(fetch_headers, 'user-agent');
+            headers['user-agent'] = userAgent;
+            setHeaderIfAbsent(headers, 'accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
+            if (target_cookies.length > 0) {
+              setHeaderIfAbsent(headers, 'cookie', buildCookieHeader(target_cookies));
+            }
+
+            if ((currentMethod === 'GET' || currentMethod === 'HEAD') && !currentBody && currentUrl === conditionalUrl) {
+              if (previous?.etag) setHeaderIfAbsent(headers, 'if-none-match', previous.etag);
+              if (previous?.lastModified) setHeaderIfAbsent(headers, 'if-modified-since', previous.lastModified);
+            }
+
             const res = await fetch(currentUrl, {
-              method: 'GET',
+              method: currentMethod,
               redirect: 'manual',
               signal: controller.signal,
               dispatcher,
-              headers: {
-                'user-agent': 'SentinelWebhook/0.1 (+https://github.com/firasmosbehi/sentinel-webhook)',
-                accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                ...(previous?.etag ? { 'if-none-match': previous.etag } : {}),
-                ...(previous?.lastModified ? { 'if-modified-since': previous.lastModified } : {}),
-                ...fetch_headers,
-              },
+              headers,
+              body: currentBody,
             } as unknown as RequestInit);
 
             if (REDIRECT_STATUS_CODES.has(res.status)) {
               const loc = res.headers.get('location');
               if (!loc) throw new HttpError(`Redirect status ${res.status} missing Location header`, res.status);
               if (i === max_redirects) throw new HttpError(`Too many redirects (>${max_redirects})`, res.status);
-              currentUrl = normalizeHttpUrl(new URL(loc, currentUrl).toString());
+
+              const nextUrl = normalizeHttpUrl(new URL(loc, currentUrl).toString());
+              // Follow common browser behavior: convert POST-like requests to GET on 301/302/303.
+              if (
+                res.status === 303 ||
+                ((res.status === 301 || res.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD')
+              ) {
+                currentMethod = 'GET';
+                currentBody = undefined;
+              }
+
+              currentUrl = nextUrl;
               continue;
             }
 
@@ -260,7 +355,9 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
   const { status, headers, text: html, notModified, bytesRead, finalUrl, redirectCount } = result;
   const fetchDurationMs = Date.now() - startedAt;
   const contentType = headers.get('content-type') ?? undefined;
-  const looksJson = (contentType ?? previous?.contentType ?? '').toLowerCase().includes('json');
+  const ctLower = (contentType ?? previous?.contentType ?? '').toLowerCase();
+  const looksJson = ctLower.includes('json');
+  const looksXml = !looksJson && ctLower.includes('xml') && !ctLower.includes('html');
 
   const fetchedAt = new Date().toISOString();
 
@@ -296,6 +393,7 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
       ignoreSelectors: ignore_selectors,
       ignoreAttributes: ignore_attributes,
       ignoreRegexes: ignore_regexes,
+      xmlMode: looksXml,
     });
     extracted = { text: stableStringifyJson(values) };
   } else if (looksJson) {
@@ -316,6 +414,10 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
         ignoreSelectors: ignore_selectors,
         ignoreAttributes: ignore_attributes,
         ignoreRegexes: ignore_regexes,
+        xmlMode: looksXml,
+        selectorAggregationMode: selector_aggregation_mode,
+        whitespaceMode: whitespace_mode,
+        unicodeNormalization: unicode_normalization,
       });
     } catch (err) {
       if (err instanceof EmptySelectorMatchError) {
@@ -323,6 +425,13 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
       } else {
         throw err;
       }
+    }
+  }
+
+  if (block_page_regexes.length > 0) {
+    const matched = matchesAnyRegex(extracted.text, block_page_regexes) ?? (extracted.html ? matchesAnyRegex(extracted.html, block_page_regexes) : null);
+    if (matched) {
+      throw new Error(`Possible block/soft-ban page detected (matched block_page_regex: ${matched})`);
     }
   }
 
@@ -367,6 +476,8 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
     target_url,
     selector,
     fetch_headers,
+    target_cookies,
+    playwright_block_resources,
     proxy_configuration,
     target_domain_allowlist,
     target_domain_denylist,
@@ -375,6 +486,9 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
     politeness_jitter_ms,
     min_text_length,
     on_empty_snapshot,
+    selector_aggregation_mode,
+    whitespace_mode,
+    unicode_normalization,
     fields,
     ignore_json_paths,
     ignore_selectors,
@@ -383,7 +497,11 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
     wait_until,
     wait_for_selector,
     wait_for_selector_timeout_secs,
+    robots_txt_mode,
+    block_page_regexes,
   } = input;
+
+  const allowLocalhost = input.allow_localhost && !(Actor.getEnv().isAtHome ?? false);
 
   const { chromium } = await import('playwright');
 
@@ -392,7 +510,7 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
     allowlist: target_domain_allowlist,
     denylist: target_domain_denylist,
   });
-  await assertSafeHttpUrl(target_url, 'target_url');
+  await assertSafeHttpUrl(target_url, 'target_url', { allowLocalhost });
 
   const proxyUrl = await resolveProxyUrl(proxy_configuration);
   const launchOpts: { headless: boolean; proxy?: { server: string; username?: string; password?: string } } = {
@@ -425,17 +543,38 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
         }
 
         const context = await browser.newContext({ userAgent, extraHTTPHeaders: extraHeaders });
+        if (target_cookies.length > 0) {
+          await context.addCookies(
+            target_cookies.map((c) => ({
+              name: c.name,
+              value: c.value,
+              url: c.domain ? undefined : target_url,
+              domain: c.domain,
+              path: c.path ?? '/',
+              expires: c.expires,
+              httpOnly: c.httpOnly,
+              secure: c.secure,
+              sameSite: c.sameSite,
+            })),
+          );
+        }
         const page = await context.newPage();
 
-        try {
-          await page.route('**/*', async (route: Route) => {
-            const url = route.request().url();
-            if (!url.startsWith('http://') && !url.startsWith('https://')) {
-              await route.abort();
-              return;
-            }
+	        try {
+	          await page.route('**/*', async (route: Route) => {
+	            const req = route.request();
+	            const url = req.url();
+	            const resourceType = req.resourceType();
+	            if (playwright_block_resources && (resourceType === 'image' || resourceType === 'media' || resourceType === 'font')) {
+	              await route.abort();
+	              return;
+	            }
+	            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+	              await route.abort();
+	              return;
+	            }
             try {
-              await assertSafeHttpUrl(url, 'playwright_request');
+              await assertSafeHttpUrl(url, 'playwright_request', { allowLocalhost });
             } catch {
               await route.abort();
               return;
@@ -444,6 +583,10 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
           });
 
           await waitForPoliteness(target_url, politeness_delay_ms, politeness_jitter_ms);
+
+          if (robots_txt_mode === 'respect') {
+            await assertRobotsAllowed(target_url, userAgent, { timeoutSecs: Math.min(10, fetch_timeout_secs), allowOnError: true });
+          }
 
           const nav = await page.goto(target_url, { waitUntil: wait_until, timeout: fetch_timeout_secs * 1000 });
           if (!nav) throw new Error('Playwright navigation failed (no response).');
@@ -456,18 +599,23 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
             allowlist: target_domain_allowlist,
             denylist: target_domain_denylist,
           });
-          await assertSafeHttpUrl(finalUrl, 'target_url');
+          await assertSafeHttpUrl(finalUrl, 'target_url', { allowLocalhost });
+          if (robots_txt_mode === 'respect') {
+            await assertRobotsAllowed(finalUrl, userAgent, { timeoutSecs: Math.min(10, fetch_timeout_secs), allowOnError: true });
+          }
 
           const navHeaders = nav.headers();
           const contentType = navHeaders['content-type'];
-          const looksJson = (contentType ?? '').toLowerCase().includes('json');
+          const ctLower = (contentType ?? '').toLowerCase();
+          const looksJson = ctLower.includes('json');
+          const looksXml = !looksJson && ctLower.includes('xml') && !ctLower.includes('html');
 
           const waitSel = wait_for_selector ?? selector;
           if (waitSel) {
             await page.waitForSelector(waitSel, { timeout: wait_for_selector_timeout_secs * 1000 });
           }
 
-          const bodyText = looksJson && fields.length === 0 ? await nav.text() : await page.content();
+          const bodyText = looksJson || looksXml ? await nav.text() : await page.content();
           const bytesRead = Buffer.byteLength(bodyText, 'utf8');
           if (bytesRead > max_content_bytes) {
             throw new Error(`Response exceeds max_content_bytes (${bytesRead} > ${max_content_bytes})`);
@@ -508,7 +656,9 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
   const fetchDurationMs = Date.now() - startedAt;
   const fetchedAt = new Date().toISOString();
   const contentType = result.headers['content-type'];
-  const looksJson = (contentType ?? '').toLowerCase().includes('json');
+  const ctLower = (contentType ?? '').toLowerCase();
+  const looksJson = ctLower.includes('json');
+  const looksXml = !looksJson && ctLower.includes('xml') && !ctLower.includes('html');
 
   let mode: Snapshot['mode'] = 'text';
   let extracted: { text: string; html?: string };
@@ -519,6 +669,7 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
       ignoreSelectors: ignore_selectors,
       ignoreAttributes: ignore_attributes,
       ignoreRegexes: ignore_regexes,
+      xmlMode: looksXml,
     });
     extracted = { text: stableStringifyJson(values) };
   } else if (looksJson) {
@@ -539,6 +690,10 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
         ignoreSelectors: ignore_selectors,
         ignoreAttributes: ignore_attributes,
         ignoreRegexes: ignore_regexes,
+        xmlMode: looksXml,
+        selectorAggregationMode: selector_aggregation_mode,
+        whitespaceMode: whitespace_mode,
+        unicodeNormalization: unicode_normalization,
       });
     } catch (err) {
       if (err instanceof EmptySelectorMatchError) {
@@ -546,6 +701,13 @@ async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot
       } else {
         throw err;
       }
+    }
+  }
+
+  if (block_page_regexes.length > 0) {
+    const matched = matchesAnyRegex(extracted.text, block_page_regexes) ?? (extracted.html ? matchesAnyRegex(extracted.html, block_page_regexes) : null);
+    if (matched) {
+      throw new Error(`Possible block/soft-ban page detected (matched block_page_regex: ${matched})`);
     }
   }
 
