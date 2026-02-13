@@ -1,9 +1,20 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 
+export class EmptySelectorMatchError extends Error {
+  public readonly selector: string;
+
+  constructor(selector: string) {
+    super(`Selector matched 0 elements: ${selector}`);
+    this.name = 'EmptySelectorMatchError';
+    this.selector = selector;
+  }
+}
+
 export type NormalizeOptions = {
   selector?: string;
   ignoreSelectors: string[];
+  ignoreAttributes: string[];
   ignoreRegexes: string[];
 };
 
@@ -38,6 +49,16 @@ export function normalizeHtmlToSnapshot(html: string, opts: NormalizeOptions): {
     }
   }
 
+  for (const attrRaw of opts.ignoreAttributes) {
+    const attr = attrRaw.trim();
+    if (!attr) continue;
+    if (!/^[a-zA-Z_][\\w:-]*$/.test(attr)) {
+      throw new Error(`Invalid ignore attribute: ${attrRaw}`);
+    }
+    // Remove attribute from all elements (Cheerio will no-op where absent).
+    $('*').removeAttr(attr);
+  }
+
   let pickedHtml: string | undefined;
   let pickedText: string;
 
@@ -50,7 +71,7 @@ export function normalizeHtmlToSnapshot(html: string, opts: NormalizeOptions): {
     }
 
     if (nodes.length === 0) {
-      throw new Error(`Selector matched 0 elements: ${opts.selector}`);
+      throw new EmptySelectorMatchError(opts.selector);
     }
 
     pickedHtml = nodes

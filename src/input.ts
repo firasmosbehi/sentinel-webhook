@@ -1,6 +1,14 @@
 import { z } from 'zod';
-import type { BaselineMode, HistoryMode, SentinelInput } from './types.js';
+import type {
+  BaselineMode,
+  HistoryMode,
+  IgnoreRegexPreset,
+  OnEmptySnapshotBehavior,
+  RenderingMode,
+  SentinelInput,
+} from './types.js';
 import { normalizeHttpUrl } from './url_normalize.js';
+import { expandIgnoreRegexPresets } from './regex_presets.js';
 
 const httpUrl = z
   .string()
@@ -20,10 +28,25 @@ const historyModeSchema: z.ZodType<HistoryMode> = z.union([
   z.literal('all_events'),
 ]);
 
+const renderingModeSchema: z.ZodType<RenderingMode> = z.union([z.literal('static'), z.literal('playwright')]);
+
+const onEmptySnapshotSchema: z.ZodType<OnEmptySnapshotBehavior> = z.union([
+  z.literal('error'),
+  z.literal('treat_as_change'),
+  z.literal('ignore'),
+]);
+
+const ignoreRegexPresetSchema: z.ZodType<IgnoreRegexPreset> = z.union([
+  z.literal('timestamps'),
+  z.literal('uuids'),
+  z.literal('tokens'),
+]);
+
 const rawInputSchema = z
   .object({
     target_url: httpUrl,
     selector: z.string().trim().min(1).optional(),
+    rendering_mode: renderingModeSchema.optional(),
     fetch_headers: z.record(z.string(), z.string()).optional(),
     proxy_configuration: z
       .object({
@@ -67,9 +90,14 @@ const rawInputSchema = z
     max_content_bytes: z.coerce.number().int().min(1).optional(),
     max_payload_bytes: z.coerce.number().int().min(1024).optional(),
     reset_baseline: z.coerce.boolean().optional(),
+    min_text_length: z.coerce.number().int().min(0).optional(),
+    on_empty_snapshot: onEmptySnapshotSchema.optional(),
+    min_change_ratio: z.coerce.number().min(0).max(1).optional(),
 
     ignore_selectors: z.array(z.string().trim().min(1)).optional(),
+    ignore_attributes: z.array(z.string().trim().min(1)).optional(),
     ignore_regexes: z.array(z.string().trim().min(1)).optional(),
+    ignore_regex_presets: z.array(ignoreRegexPresetSchema).optional(),
     redact_logs: z.coerce.boolean().optional(),
     debug: z.coerce.boolean().optional(),
   })
@@ -83,10 +111,14 @@ export function parseInput(raw: unknown): SentinelInput {
   const retry_backoff_ms = parsed.retry_backoff_ms ?? 1000;
 
   const proxy_configuration = parsed.proxy_configuration;
+  const ignore_regex_presets = parsed.ignore_regex_presets ?? [];
+  const expandedPresetRegexes = expandIgnoreRegexPresets(ignore_regex_presets);
+  const ignore_regexes = [...expandedPresetRegexes, ...(parsed.ignore_regexes ?? [])];
 
   return {
     target_url: normalizeHttpUrl(parsed.target_url),
     selector: parsed.selector,
+    rendering_mode: parsed.rendering_mode ?? 'static',
     fetch_headers: parsed.fetch_headers ?? {},
     proxy_configuration: proxy_configuration
       ? {
@@ -129,9 +161,14 @@ export function parseInput(raw: unknown): SentinelInput {
     max_content_bytes: parsed.max_content_bytes ?? 2_000_000,
     max_payload_bytes: parsed.max_payload_bytes ?? 250_000,
     reset_baseline: parsed.reset_baseline ?? false,
+    min_text_length: parsed.min_text_length ?? 0,
+    on_empty_snapshot: parsed.on_empty_snapshot ?? 'error',
+    min_change_ratio: parsed.min_change_ratio ?? 0,
 
     ignore_selectors: parsed.ignore_selectors ?? [],
-    ignore_regexes: parsed.ignore_regexes ?? [],
+    ignore_attributes: parsed.ignore_attributes ?? [],
+    ignore_regexes,
+    ignore_regex_presets,
     redact_logs: parsed.redact_logs ?? true,
     debug: parsed.debug ?? false,
   };

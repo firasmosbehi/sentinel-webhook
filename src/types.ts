@@ -2,6 +2,12 @@ export type BaselineMode = 'store_only' | 'notify';
 
 export type HistoryMode = 'none' | 'changes_only' | 'all_events';
 
+export type RenderingMode = 'static' | 'playwright';
+
+export type OnEmptySnapshotBehavior = 'error' | 'treat_as_change' | 'ignore';
+
+export type IgnoreRegexPreset = 'timestamps' | 'uuids' | 'tokens';
+
 export type ProxyConfigurationInput = {
   use_apify_proxy?: boolean;
   apify_proxy_groups?: string[];
@@ -12,6 +18,7 @@ export type ProxyConfigurationInput = {
 export type SentinelInput = {
   target_url: string;
   selector?: string;
+  rendering_mode: RenderingMode;
   fetch_headers: Record<string, string>;
   proxy_configuration?: ProxyConfigurationInput;
   target_domain_allowlist: string[];
@@ -49,8 +56,13 @@ export type SentinelInput = {
   max_content_bytes: number;
   max_payload_bytes: number;
   reset_baseline: boolean;
+  min_text_length: number;
+  on_empty_snapshot: OnEmptySnapshotBehavior;
+  min_change_ratio: number;
   ignore_selectors: string[];
+  ignore_attributes: string[];
   ignore_regexes: string[];
+  ignore_regex_presets: IgnoreRegexPreset[];
   redact_logs: boolean;
   debug: boolean;
 };

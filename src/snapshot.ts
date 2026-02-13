@@ -1,6 +1,6 @@
 import { withRetries } from './retry.js';
 import { sha256Hex } from './hash.js';
-import { normalizeHtmlToSnapshot } from './normalize.js';
+import { EmptySelectorMatchError, normalizeHtmlToSnapshot } from './normalize.js';
 import { readResponseTextWithLimit } from './http.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
@@ -16,6 +16,20 @@ export class HttpError extends Error {
     super(message);
     this.name = 'HttpError';
     this.statusCode = statusCode;
+  }
+}
+
+export class EmptySnapshotError extends Error {
+  public readonly textLength: number;
+  public readonly minTextLength: number;
+  public readonly ignored: boolean;
+
+  constructor(message: string, textLength: number, minTextLength: number, ignored: boolean) {
+    super(message);
+    this.name = 'EmptySnapshotError';
+    this.textLength = textLength;
+    this.minTextLength = minTextLength;
+    this.ignored = ignored;
   }
 }
 
@@ -37,6 +51,10 @@ function isRetryableFetchError(err: unknown): boolean {
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 
 export async function buildSnapshot(input: SentinelInput, previous: Snapshot | null = null): Promise<Snapshot> {
+  if (input.rendering_mode !== 'static') {
+    throw new Error(`rendering_mode=${input.rendering_mode} is not implemented yet`);
+  }
+
   const {
     fetch_max_retries,
     fetch_retry_backoff_ms,
@@ -49,9 +67,12 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     target_domain_allowlist,
     target_domain_denylist,
     ignore_selectors,
+    ignore_attributes,
     ignore_regexes,
     max_redirects,
     max_content_bytes,
+    min_text_length,
+    on_empty_snapshot,
   } = input;
 
   const connectTimeoutMs = fetch_connect_timeout_secs * 1000;
@@ -165,11 +186,33 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     };
   }
 
-  const extracted = normalizeHtmlToSnapshot(html, {
-    selector,
-    ignoreSelectors: ignore_selectors,
-    ignoreRegexes: ignore_regexes,
-  });
+  let extracted: { text: string; html?: string };
+  try {
+    extracted = normalizeHtmlToSnapshot(html, {
+      selector,
+      ignoreSelectors: ignore_selectors,
+      ignoreAttributes: ignore_attributes,
+      ignoreRegexes: ignore_regexes,
+    });
+  } catch (err) {
+    if (err instanceof EmptySelectorMatchError) {
+      extracted = { text: '', html: undefined };
+    } else {
+      throw err;
+    }
+  }
+
+  const textLen = extracted.text.length;
+  if (textLen === 0 || textLen < min_text_length) {
+    const msg = `Empty snapshot (text length ${textLen}, min_text_length ${min_text_length})`;
+    if (on_empty_snapshot === 'ignore') {
+      throw new EmptySnapshotError(msg, textLen, min_text_length, true);
+    }
+    if (on_empty_snapshot === 'error') {
+      throw new EmptySnapshotError(msg, textLen, min_text_length, false);
+    }
+    // treat_as_change: continue
+  }
 
   return {
     url: target_url,

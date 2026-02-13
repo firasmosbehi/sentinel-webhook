@@ -1,6 +1,7 @@
 {
   "target_url": "https://example.com",
   "selector": "h1",
+  "rendering_mode": "static",
   "fetch_headers": {},
   "proxy_configuration": {
     "use_apify_proxy": false
@@ -33,8 +34,13 @@
   "max_content_bytes": 2000000,
   "max_payload_bytes": 250000,
   "reset_baseline": false,
+  "min_text_length": 0,
+  "on_empty_snapshot": "error",
+  "min_change_ratio": 0,
   "ignore_selectors": [],
+  "ignore_attributes": [],
   "ignore_regexes": [],
+  "ignore_regex_presets": [],
   "redact_logs": true,
   "debug": false
 }

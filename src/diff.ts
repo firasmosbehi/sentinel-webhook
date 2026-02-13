@@ -27,3 +27,29 @@ export function computeTextChange(previous: Snapshot, current: Snapshot): {
 
   return out;
 }
+
+export function approxChangeRatio(oldText: string, newText: string): number {
+  if (oldText === newText) return 0;
+  const oldLen = oldText.length;
+  const newLen = newText.length;
+  const denom = oldLen + newLen;
+  if (denom === 0) return 0;
+
+  let prefix = 0;
+  while (prefix < oldLen && prefix < newLen && oldText[prefix] === newText[prefix]) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < oldLen - prefix &&
+    suffix < newLen - prefix &&
+    oldText[oldLen - 1 - suffix] === newText[newLen - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const changedOld = oldLen - prefix - suffix;
+  const changedNew = newLen - prefix - suffix;
+  return (changedOld + changedNew) / denom;
+}

@@ -2,9 +2,9 @@ import { Actor, log } from 'apify';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { parseInput } from './input.js';
-import { buildSnapshot } from './snapshot.js';
-import { computeTextChange } from './diff.js';
-import { makeStateKey } from './state.js';
+import { buildSnapshot, EmptySnapshotError } from './snapshot.js';
+import { approxChangeRatio, computeTextChange } from './diff.js';
+import { makeStateKeyV1, makeStateKeyV2 } from './state.js';
 import { sendWebhook, WebhookDeliveryError } from './webhook.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { redactText, redactUrl, truncate } from './redact.js';
@@ -94,9 +94,22 @@ await Actor.main(async () => {
   });
 
   const kv = await Actor.openKeyValueStore(input.state_store_name);
-  const stateKey = makeStateKey(input.target_url, input.selector);
+  const stateKeyV2 = makeStateKeyV2({
+    targetUrl: input.target_url,
+    selector: input.selector,
+    renderingMode: input.rendering_mode,
+    fetchHeaders: input.fetch_headers,
+    ignoreSelectors: input.ignore_selectors,
+    ignoreAttributes: input.ignore_attributes,
+    ignoreRegexes: input.ignore_regexes,
+  });
+  const stateKeyV1 = makeStateKeyV1(input.target_url, input.selector);
+  const stateKey = stateKeyV2;
 
-  const storedPrevious = (await kv.getValue<Snapshot>(stateKey)) ?? null;
+  const storedPreviousV2 = (await kv.getValue<Snapshot>(stateKeyV2)) ?? null;
+  const storedPreviousV1 = storedPreviousV2 ? null : ((await kv.getValue<Snapshot>(stateKeyV1)) ?? null);
+  const storedPrevious = storedPreviousV2 ?? storedPreviousV1;
+  const migratedFromV1 = !!storedPreviousV1;
   const previous = input.reset_baseline ? null : storedPrevious;
 
   const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
@@ -128,23 +141,73 @@ await Actor.main(async () => {
     });
   }
 
+  if (migratedFromV1) {
+    log.info('Loaded baseline from legacy state key; will migrate to v2 on successful write.', { stateKeyV1, stateKeyV2 });
+    await Actor.pushData({
+      event: 'BASELINE_MIGRATED',
+      timestamp: new Date().toISOString(),
+      stateKeyV1,
+      stateKeyV2,
+      url: safeUrl(input.target_url, input.redact_logs),
+      selector: input.selector,
+      previous: storedPrevious ? { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt } : null,
+    });
+  }
+
   let current: Snapshot;
   try {
     current = await buildSnapshot(input, previous);
   } catch (err) {
-    log.exception(toError(err), 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
+    const e = toError(err);
+    const timestamp = new Date().toISOString();
+    const isEmpty = err instanceof EmptySnapshotError;
+
+    if (isEmpty && err.ignored) {
+      log.info('Empty snapshot ignored. Keeping previous baseline intact.', {
+        stateKey,
+        textLength: err.textLength,
+        minTextLength: err.minTextLength,
+      });
+      await Actor.pushData({
+        event: 'EMPTY_SNAPSHOT_IGNORED',
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        timestamp,
+        stateKey,
+        textLength: err.textLength,
+        minTextLength: err.minTextLength,
+      });
+
+      if (input.history_mode === 'all_events') {
+        await pushHistory({
+          event: 'EMPTY_SNAPSHOT_IGNORED',
+          timestamp,
+          stateKey,
+          url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          textLength: err.textLength,
+          minTextLength: err.minTextLength,
+        });
+      }
+      return;
+    }
+
+    log.exception(e, 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
     await Actor.pushData({
-      event: 'FETCH_FAILED',
+      event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
       url: safeUrl(input.target_url, input.redact_logs),
       selector: input.selector,
-      timestamp: new Date().toISOString(),
+      timestamp,
       stateKey,
+      error: isEmpty ? { name: e.name, message: input.redact_logs ? redactText(e.message) : e.message } : undefined,
+      textLength: isEmpty ? err.textLength : undefined,
+      minTextLength: isEmpty ? err.minTextLength : undefined,
     });
 
     if (input.history_mode === 'all_events') {
       await pushHistory({
-        event: 'FETCH_FAILED',
-        timestamp: new Date().toISOString(),
+        event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
+        timestamp,
         stateKey,
         url: safeUrl(input.target_url, input.redact_logs),
         selector: input.selector,
@@ -288,6 +351,42 @@ await Actor.main(async () => {
     // Refresh baseline metadata (timestamps/headers) even if content is unchanged.
     await kv.setValue(stateKey, current);
     return;
+  }
+
+  if (input.min_change_ratio > 0) {
+    const ratio = approxChangeRatio(change.old, change.new);
+    if (ratio < input.min_change_ratio) {
+      log.info('Change suppressed (below min_change_ratio).', { stateKey, ratio, min_change_ratio: input.min_change_ratio });
+      await Actor.pushData({
+        event: 'CHANGE_SUPPRESSED',
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        timestamp: new Date().toISOString(),
+        ratio,
+        min_change_ratio: input.min_change_ratio,
+        previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+        stateKey,
+      });
+
+      if (input.history_mode === 'all_events') {
+        await pushHistory({
+          event: 'CHANGE_SUPPRESSED',
+          timestamp: new Date().toISOString(),
+          stateKey,
+          url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          ratio,
+          min_change_ratio: input.min_change_ratio,
+          previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+          current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+        });
+      }
+
+      // Suppress alert but still advance baseline to avoid repeated detections.
+      await kv.setValue(stateKey, current);
+      return;
+    }
   }
 
   const payloadBase: ChangePayload = {

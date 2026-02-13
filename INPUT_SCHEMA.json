@@ -15,6 +15,14 @@
       "description": "Optional CSS selector to watch only a specific part of the page (e.g. .price, #stock-count).",
       "editor": "textfield"
     },
+    "rendering_mode": {
+      "title": "Rendering mode",
+      "type": "string",
+      "description": "How to fetch/render the page before extracting content.",
+      "editor": "select",
+      "default": "static",
+      "enum": ["static", "playwright"]
+    },
     "fetch_headers": {
       "title": "Fetch headers (optional)",
       "type": "object",
@@ -228,6 +236,29 @@
       "description": "Force storing a new baseline snapshot, even if one already exists.",
       "default": false
     },
+    "min_text_length": {
+      "title": "Min text length",
+      "type": "integer",
+      "description": "If extracted text is empty or shorter than this, apply on_empty_snapshot behavior.",
+      "default": 0,
+      "minimum": 0
+    },
+    "on_empty_snapshot": {
+      "title": "On empty snapshot",
+      "type": "string",
+      "description": "Behavior when extracted text is empty/too short: error, treat_as_change, or ignore (keep previous baseline).",
+      "editor": "select",
+      "default": "error",
+      "enum": ["error", "treat_as_change", "ignore"]
+    },
+    "min_change_ratio": {
+      "title": "Min change ratio",
+      "type": "number",
+      "description": "Suppress changes smaller than this ratio (0..1). Uses a fast approximate ratio based on common prefix/suffix.",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 1
+    },
     "ignore_selectors": {
       "title": "Ignore selectors (optional)",
       "type": "array",
@@ -235,10 +266,24 @@
       "editor": "stringList",
       "items": { "type": "string" }
     },
+    "ignore_attributes": {
+      "title": "Ignore attributes (optional)",
+      "type": "array",
+      "description": "HTML attributes to strip from the DOM before extracting content (noise reduction).",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
     "ignore_regexes": {
       "title": "Ignore regexes (optional)",
       "type": "array",
       "description": "Regex patterns to scrub from extracted text (e.g. timestamps, tokens). Supports either plain patterns or /pattern/flags.",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "ignore_regex_presets": {
+      "title": "Ignore regex presets (optional)",
+      "type": "array",
+      "description": "Built-in ignore presets to scrub common dynamic values. Options: timestamps, uuids, tokens.",
       "editor": "stringList",
       "items": { "type": "string" }
     },

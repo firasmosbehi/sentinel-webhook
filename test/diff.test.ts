@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeTextChange } from '../src/diff.js';
+import { approxChangeRatio, computeTextChange } from '../src/diff.js';
 import type { Snapshot } from '../src/types.js';
 
 function snap(text: string, contentHash: string): Snapshot {
@@ -28,3 +28,14 @@ describe('computeTextChange', () => {
   });
 });
 
+describe('approxChangeRatio', () => {
+  it('returns 0 for identical text', () => {
+    expect(approxChangeRatio('abc', 'abc')).toBe(0);
+  });
+
+  it('returns a small ratio for a tiny change', () => {
+    const r = approxChangeRatio('hello world', 'hello world!');
+    expect(r).toBeGreaterThan(0);
+    expect(r).toBeLessThan(0.2);
+  });
+});

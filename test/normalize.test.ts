@@ -15,7 +15,7 @@ describe('normalizeHtmlToSnapshot', () => {
       </html>
     `;
 
-    const out = normalizeHtmlToSnapshot(html, { ignoreSelectors: [], ignoreRegexes: [] });
+    const out = normalizeHtmlToSnapshot(html, { ignoreSelectors: [], ignoreAttributes: [], ignoreRegexes: [] });
     expect(out.text).toBe('Hello world');
   });
 
@@ -30,6 +30,7 @@ describe('normalizeHtmlToSnapshot', () => {
     const out = normalizeHtmlToSnapshot(html, {
       selector: 'body',
       ignoreSelectors: ['.ad'],
+      ignoreAttributes: [],
       ignoreRegexes: [],
     });
     expect(out.text).toContain('$49.99');
@@ -40,9 +41,9 @@ describe('normalizeHtmlToSnapshot', () => {
     const html = `<body>Updated at 2026-01-01T10:00:00Z</body>`;
     const out = normalizeHtmlToSnapshot(html, {
       ignoreSelectors: [],
+      ignoreAttributes: [],
       ignoreRegexes: ['\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z'],
     });
     expect(out.text).toBe('Updated at');
   });
 });
-
