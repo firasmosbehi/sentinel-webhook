@@ -102,7 +102,7 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
                 ...(previous?.lastModified ? { 'if-modified-since': previous.lastModified } : {}),
                 ...fetch_headers,
               },
-            } as any);
+            } as unknown as RequestInit);
 
             if (REDIRECT_STATUS_CODES.has(res.status)) {
               const loc = res.headers.get('location');

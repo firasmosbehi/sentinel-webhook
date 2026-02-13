@@ -72,15 +72,17 @@ export async function sendWebhook(input: SentinelInput, payload: ChangePayload):
   });
 
   const json = JSON.stringify(payload);
+  const timestamp = Math.floor(Date.now() / 1000).toString();
   const headers: Record<string, string> = {
     'content-type': 'application/json; charset=utf-8',
     ...input.webhook_headers,
     'x-sentinel-event-id': payload.event_id,
     'idempotency-key': payload.event_id,
+    'x-sentinel-timestamp': timestamp,
   };
 
   if (input.webhook_secret) {
-    headers['x-sentinel-signature'] = `sha256=${hmacSha256Hex(input.webhook_secret, json)}`;
+    headers['x-sentinel-signature'] = `sha256=${hmacSha256Hex(input.webhook_secret, `${timestamp}.${json}`)}`;
   }
 
   const retryStatusSet = new Set(input.webhook_retry_on_statuses);
