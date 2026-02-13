@@ -60,6 +60,7 @@ MVP implemented (Apify Actor + stateful diffing via Key-Value Store).
 ## Documentation
 
 - Quickstart: `docs/quickstart.md`
+- Roadmap: `docs/roadmap.md`
 - Input reference: `docs/input-reference.md`
 - Webhook payload: `docs/webhook-payload.md`
 - Security model: `docs/security.md`
