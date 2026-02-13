@@ -8,6 +8,19 @@ export type OnEmptySnapshotBehavior = 'error' | 'treat_as_change' | 'ignore';
 
 export type IgnoreRegexPreset = 'timestamps' | 'uuids' | 'tokens';
 
+export type FieldSpec =
+  | {
+      name: string;
+      selector: string;
+      type: 'text';
+    }
+  | {
+      name: string;
+      selector: string;
+      type: 'attribute';
+      attribute: string;
+    };
+
 export type ProxyConfigurationInput = {
   use_apify_proxy?: boolean;
   apify_proxy_groups?: string[];
@@ -59,6 +72,8 @@ export type SentinelInput = {
   min_text_length: number;
   on_empty_snapshot: OnEmptySnapshotBehavior;
   min_change_ratio: number;
+  fields: FieldSpec[];
+  ignore_json_paths: string[];
   ignore_selectors: string[];
   ignore_attributes: string[];
   ignore_regexes: string[];
@@ -72,6 +87,7 @@ export type Snapshot = {
   selector?: string;
   fetchedAt: string;
   statusCode: number;
+  mode?: 'text' | 'fields' | 'json';
   finalUrl?: string;
   redirectCount?: number;
   bytesRead?: number;
@@ -95,10 +111,26 @@ export type ChangePayload = {
   timestamp: string;
   payload_truncated?: boolean;
   changes?: {
-    text: {
+    text?: {
       old: string;
       new: string;
       delta?: number;
+    };
+    fields?: Record<
+      string,
+      {
+        old: string;
+        new: string;
+        delta?: number;
+      }
+    >;
+    json?: {
+      diffs: Array<{
+        path: string;
+        op: 'add' | 'remove' | 'replace';
+        old?: unknown;
+        new?: unknown;
+      }>;
     };
   };
   previous?: Pick<Snapshot, 'contentHash' | 'fetchedAt'>;

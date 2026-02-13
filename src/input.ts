@@ -42,6 +42,23 @@ const ignoreRegexPresetSchema: z.ZodType<IgnoreRegexPreset> = z.union([
   z.literal('tokens'),
 ]);
 
+const fieldTextSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    selector: z.string().trim().min(1),
+    type: z.literal('text'),
+  })
+  .strict();
+
+const fieldAttributeSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    selector: z.string().trim().min(1),
+    type: z.literal('attribute'),
+    attribute: z.string().trim().min(1),
+  })
+  .strict();
+
 const rawInputSchema = z
   .object({
     target_url: httpUrl,
@@ -93,6 +110,8 @@ const rawInputSchema = z
     min_text_length: z.coerce.number().int().min(0).optional(),
     on_empty_snapshot: onEmptySnapshotSchema.optional(),
     min_change_ratio: z.coerce.number().min(0).max(1).optional(),
+    fields: z.array(z.union([fieldTextSchema, fieldAttributeSchema])).optional(),
+    ignore_json_paths: z.array(z.string().trim().min(1)).optional(),
 
     ignore_selectors: z.array(z.string().trim().min(1)).optional(),
     ignore_attributes: z.array(z.string().trim().min(1)).optional(),
@@ -114,6 +133,15 @@ export function parseInput(raw: unknown): SentinelInput {
   const ignore_regex_presets = parsed.ignore_regex_presets ?? [];
   const expandedPresetRegexes = expandIgnoreRegexPresets(ignore_regex_presets);
   const ignore_regexes = [...expandedPresetRegexes, ...(parsed.ignore_regexes ?? [])];
+  const fields = parsed.fields ?? [];
+  const ignore_json_paths = parsed.ignore_json_paths ?? [];
+
+  const fieldNames = new Set<string>();
+  for (const f of fields) {
+    const key = f.name;
+    if (fieldNames.has(key)) throw new Error(`Duplicate field name in fields[]: ${key}`);
+    fieldNames.add(key);
+  }
 
   return {
     target_url: normalizeHttpUrl(parsed.target_url),
@@ -164,6 +192,8 @@ export function parseInput(raw: unknown): SentinelInput {
     min_text_length: parsed.min_text_length ?? 0,
     on_empty_snapshot: parsed.on_empty_snapshot ?? 'error',
     min_change_ratio: parsed.min_change_ratio ?? 0,
+    fields,
+    ignore_json_paths,
 
     ignore_selectors: parsed.ignore_selectors ?? [],
     ignore_attributes: parsed.ignore_attributes ?? [],

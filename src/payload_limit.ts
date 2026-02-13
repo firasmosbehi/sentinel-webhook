@@ -42,17 +42,18 @@ function allocateChars(total: number, oldLen: number, newLen: number): { oldChar
 }
 
 function buildTruncatedPayload(payload: ChangePayload, oldChars: number, newChars: number): ChangePayload {
-  if (!payload.changes) return payload;
+  const textChange = payload.changes?.text;
+  if (!textChange) return payload;
 
-  const oldT = truncate(payload.changes.text.old, oldChars);
-  const newT = truncate(payload.changes.text.new, newChars);
+  const oldT = truncate(textChange.old, oldChars);
+  const newT = truncate(textChange.new, newChars);
 
   return {
     ...payload,
     payload_truncated: true,
     changes: {
       text: {
-        ...payload.changes.text,
+        ...textChange,
         old: oldT.text,
         new: newT.text,
       },
@@ -68,7 +69,7 @@ export function limitPayloadBytes(
   if (initialBytes <= maxBytes) return { payload, truncated: false };
 
   // Only change payload text is truncatable today.
-  if (!payload.changes) {
+  if (!payload.changes || !payload.changes.text) {
     throw new Error(`Payload exceeds max_payload_bytes (${initialBytes} > ${maxBytes}) but has no changes to truncate.`);
   }
 
@@ -105,4 +106,3 @@ export function limitPayloadBytes(
 
   return { payload: best, truncated: true };
 }
-

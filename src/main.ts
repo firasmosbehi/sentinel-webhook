@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { parseInput } from './input.js';
 import { buildSnapshot, EmptySnapshotError } from './snapshot.js';
 import { approxChangeRatio, computeTextChange } from './diff.js';
+import { diffJson } from './json_diff.js';
 import { makeStateKeyV1, makeStateKeyV2 } from './state.js';
 import { sendWebhook, WebhookDeliveryError } from './webhook.js';
 import { assertSafeHttpUrl } from './url_safety.js';
@@ -37,6 +38,75 @@ async function loadFallbackInput(): Promise<unknown | null> {
 
 function safeUrl(rawUrl: string, redact: boolean): string {
   return redact ? redactUrl(rawUrl) : rawUrl;
+}
+
+function extractFirstNumber(text: string): number | null {
+  const m = text.match(/-?\\d+(?:\\.\\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeShortTextDelta(oldText: string, newText: string): number | undefined {
+  if (oldText.length > 64 || newText.length > 64) return undefined;
+  const prevNum = extractFirstNumber(oldText);
+  const currNum = extractFirstNumber(newText);
+  if (prevNum === null || currNum === null) return undefined;
+  return currNum - prevNum;
+}
+
+function computeFieldsChangeFromSnapshotText(
+  previousText: string,
+  currentText: string,
+): Record<string, { old: string; new: string; delta?: number }> | null {
+  let prev: unknown;
+  let curr: unknown;
+  try {
+    prev = JSON.parse(previousText);
+    curr = JSON.parse(currentText);
+  } catch {
+    return null;
+  }
+
+  if (!prev || typeof prev !== 'object' || Array.isArray(prev)) return null;
+  if (!curr || typeof curr !== 'object' || Array.isArray(curr)) return null;
+
+  const prevRec = prev as Record<string, unknown>;
+  const currRec = curr as Record<string, unknown>;
+
+  const keys = new Set([...Object.keys(prevRec), ...Object.keys(currRec)]);
+  const out: Record<string, { old: string; new: string; delta?: number }> = {};
+  for (const k of [...keys].sort()) {
+    const oldVal = prevRec[k];
+    const newVal = currRec[k];
+
+    const oldText = typeof oldVal === 'string' ? oldVal : JSON.stringify(oldVal);
+    const newText = typeof newVal === 'string' ? newVal : JSON.stringify(newVal);
+    if (oldText === newText) continue;
+
+    const delta = computeShortTextDelta(oldText, newText);
+    out[k] = delta !== undefined ? { old: oldText, new: newText, delta } : { old: oldText, new: newText };
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function computeJsonChangeFromSnapshotText(
+  previousText: string,
+  currentText: string,
+  ignoreJsonPaths: string[],
+): { diffs: ReturnType<typeof diffJson> } | null {
+  let prev: unknown;
+  let curr: unknown;
+  try {
+    prev = JSON.parse(previousText);
+    curr = JSON.parse(currentText);
+  } catch {
+    return null;
+  }
+
+  const diffs = diffJson(prev, curr, ignoreJsonPaths);
+  return diffs.length > 0 ? { diffs } : null;
 }
 
 function snapshotFetchMetrics(snapshot: Snapshot, redact: boolean): {
@@ -77,16 +147,18 @@ function buildDeadLetterPayloadPreview(payload: ChangePayload, redact: boolean):
     url: safeUrl(payload.url, redact),
   };
 
-  if (!payload.changes) return { payload: out, truncated: false };
+  const textChange = payload.changes?.text;
+  if (!textChange) return { payload: out, truncated: false };
 
-  const oldT = truncate(payload.changes.text.old, 5_000);
-  const newT = truncate(payload.changes.text.new, 5_000);
+  const oldT = truncate(textChange.old, 5_000);
+  const newT = truncate(textChange.new, 5_000);
   return {
     payload: {
       ...out,
       changes: {
+        ...payload.changes,
         text: {
-          ...payload.changes.text,
+          ...textChange,
           old: oldT.text,
           new: newT.text,
         },
@@ -124,6 +196,8 @@ await Actor.main(async () => {
     selector: input.selector,
     renderingMode: input.rendering_mode,
     fetchHeaders: input.fetch_headers,
+    fields: input.fields,
+    ignoreJsonPaths: input.ignore_json_paths,
     ignoreSelectors: input.ignore_selectors,
     ignoreAttributes: input.ignore_attributes,
     ignoreRegexes: input.ignore_regexes,
@@ -437,7 +511,19 @@ await Actor.main(async () => {
     url: input.target_url,
     selector: input.selector,
     timestamp: new Date().toISOString(),
-    changes: { text: change },
+    changes: (() => {
+      const out: NonNullable<ChangePayload['changes']> = { text: change };
+
+      if (current.mode === 'fields') {
+        const fieldsChange = computeFieldsChangeFromSnapshotText(previous.text, current.text);
+        if (fieldsChange) out.fields = fieldsChange;
+      } else if (current.mode === 'json') {
+        const jsonChange = computeJsonChangeFromSnapshotText(previous.text, current.text, input.ignore_json_paths);
+        if (jsonChange) out.json = jsonChange;
+      }
+
+      return out;
+    })(),
     previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
     current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
   };

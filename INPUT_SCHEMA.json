@@ -259,6 +259,44 @@
       "minimum": 0,
       "maximum": 1
     },
+    "fields": {
+      "title": "Fields (optional)",
+      "type": "array",
+      "description": "Optional structured extraction. Each field is an object like {\"name\": \"price\", \"selector\": \".price\", \"type\": \"text\"} or {\"name\": \"sku\", \"selector\": \"[data-sku]\", \"type\": \"attribute\", \"attribute\": \"data-sku\"}. If set, Sentinel snapshots and diffs the extracted fields.",
+      "editor": "json",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "selector": { "type": "string" },
+              "type": { "type": "string", "const": "text" }
+            },
+            "required": ["name", "selector", "type"]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "selector": { "type": "string" },
+              "type": { "type": "string", "const": "attribute" },
+              "attribute": { "type": "string" }
+            },
+            "required": ["name", "selector", "type", "attribute"]
+          }
+        ]
+      }
+    },
+    "ignore_json_paths": {
+      "title": "Ignore JSON paths (optional)",
+      "type": "array",
+      "description": "JSON Pointer paths to ignore when diffing application/json responses (e.g. /meta/timestamp).",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
     "ignore_selectors": {
       "title": "Ignore selectors (optional)",
       "type": "array",

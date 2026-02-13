@@ -13,6 +13,8 @@ simple "URL in, webhook out" change-detection bridge.
 
 - `target_url`: URL to monitor.
 - `selector` (optional): CSS selector to scope what is monitored (e.g. `.price`).
+- `fields` (optional): Structured extraction (CSS selectors + optional attributes) to produce a clean field-level diff.
+- `ignore_json_paths` (optional): JSON Pointer paths to ignore when monitoring `application/json` endpoints (e.g. `/meta/timestamp`).
 - `webhook_url`: Callback URL to POST change events to.
 
 ## Webhook Payload
@@ -29,6 +31,12 @@ simple "URL in, webhook out" change-detection bridge.
       "old": "Old text…",
       "new": "New text…",
       "delta": -4.99
+    },
+    "fields": {
+      "price": { "old": "49.99", "new": "45.00", "delta": -4.99 }
+    },
+    "json": {
+      "diffs": [{ "path": "/meta/version", "op": "replace", "old": 1, "new": 2 }]
     }
   },
   "previous": { "contentHash": "…", "fetchedAt": "2026-05-12T09:45:00Z" },

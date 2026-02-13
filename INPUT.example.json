@@ -37,6 +37,8 @@
   "min_text_length": 0,
   "on_empty_snapshot": "error",
   "min_change_ratio": 0,
+  "fields": [],
+  "ignore_json_paths": [],
   "ignore_selectors": [],
   "ignore_attributes": [],
   "ignore_regexes": [],

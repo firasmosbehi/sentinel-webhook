@@ -1,7 +1,10 @@
 import { withRetries } from './retry.js';
 import { sha256Hex } from './hash.js';
 import { EmptySelectorMatchError, normalizeHtmlToSnapshot } from './normalize.js';
+import { extractFieldsFromHtml } from './fields_extract.js';
 import { readResponseTextWithLimit } from './http.js';
+import { removeJsonPointerPaths } from './json_paths.js';
+import { stableStringifyJson } from './stable_json.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
 import { normalizeHttpUrl } from './url_normalize.js';
@@ -73,6 +76,8 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     max_content_bytes,
     min_text_length,
     on_empty_snapshot,
+    fields,
+    ignore_json_paths,
   } = input;
 
   const connectTimeoutMs = fetch_connect_timeout_secs * 1000;
@@ -196,6 +201,8 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
 
   const { status, headers, text: html, notModified, bytesRead, finalUrl, redirectCount } = result;
   const fetchDurationMs = Date.now() - startedAt;
+  const contentType = headers.get('content-type') ?? undefined;
+  const looksJson = (contentType ?? previous?.contentType ?? '').toLowerCase().includes('json');
 
   const fetchedAt = new Date().toISOString();
 
@@ -206,13 +213,14 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
       selector,
       fetchedAt,
       statusCode: status,
+      mode: previous.mode ?? (fields.length > 0 ? 'fields' : looksJson ? 'json' : 'text'),
       finalUrl,
       redirectCount,
       bytesRead,
       fetchDurationMs,
       fetchAttempts: attempts,
       notModified: true,
-      contentType: headers.get('content-type') ?? previous.contentType,
+      contentType: contentType ?? previous.contentType,
       etag: headers.get('etag') ?? previous.etag,
       lastModified: headers.get('last-modified') ?? previous.lastModified,
       text: previous.text,
@@ -221,19 +229,42 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     };
   }
 
+  let mode: Snapshot['mode'] = 'text';
   let extracted: { text: string; html?: string };
-  try {
-    extracted = normalizeHtmlToSnapshot(html, {
-      selector,
+
+  if (fields.length > 0) {
+    mode = 'fields';
+    const values = extractFieldsFromHtml(html, fields, {
       ignoreSelectors: ignore_selectors,
       ignoreAttributes: ignore_attributes,
       ignoreRegexes: ignore_regexes,
     });
-  } catch (err) {
-    if (err instanceof EmptySelectorMatchError) {
-      extracted = { text: '', html: undefined };
-    } else {
-      throw err;
+    extracted = { text: stableStringifyJson(values) };
+  } else if (looksJson) {
+    mode = 'json';
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(html);
+    } catch {
+      throw new Error('Failed to parse application/json response.');
+    }
+    const sanitized = ignore_json_paths.length > 0 ? removeJsonPointerPaths(parsed, ignore_json_paths) : parsed;
+    extracted = { text: stableStringifyJson(sanitized) };
+  } else {
+    mode = 'text';
+    try {
+      extracted = normalizeHtmlToSnapshot(html, {
+        selector,
+        ignoreSelectors: ignore_selectors,
+        ignoreAttributes: ignore_attributes,
+        ignoreRegexes: ignore_regexes,
+      });
+    } catch (err) {
+      if (err instanceof EmptySelectorMatchError) {
+        extracted = { text: '', html: undefined };
+      } else {
+        throw err;
+      }
     }
   }
 
@@ -254,13 +285,14 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     selector,
     fetchedAt,
     statusCode: status,
+    mode,
     finalUrl,
     redirectCount,
     bytesRead,
     fetchDurationMs,
     fetchAttempts: attempts,
     notModified: false,
-    contentType: headers.get('content-type') ?? undefined,
+    contentType,
     etag: headers.get('etag') ?? undefined,
     lastModified: headers.get('last-modified') ?? undefined,
     text: extracted.text,

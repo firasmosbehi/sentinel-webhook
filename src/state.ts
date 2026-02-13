@@ -1,10 +1,13 @@
 import { sha256Hex } from './hash.js';
+import type { FieldSpec } from './types.js';
 
 export type StateKeyV2Input = {
   targetUrl: string;
   selector?: string;
   renderingMode: string;
   fetchHeaders: Record<string, string>;
+  fields: FieldSpec[];
+  ignoreJsonPaths: string[];
   ignoreSelectors: string[];
   ignoreAttributes: string[];
   ignoreRegexes: string[];
@@ -21,12 +24,24 @@ export function makeStateKeyV2(input: StateKeyV2Input): string {
     .sort()
     .map((k) => [k.toLowerCase(), input.fetchHeaders[k]] as const);
 
+  const fields = input.fields
+    .map((f) =>
+      f.type === 'text'
+        ? { name: f.name, selector: f.selector, type: 'text' as const }
+        : { name: f.name, selector: f.selector, type: 'attribute' as const, attribute: f.attribute },
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const ignoreJsonPaths = [...input.ignoreJsonPaths].sort();
+
   const keyMaterial = JSON.stringify({
     v: 2,
     targetUrl: input.targetUrl,
     selector: input.selector ?? null,
     renderingMode: input.renderingMode,
     fetchHeaders: headers,
+    fields,
+    ignoreJsonPaths,
     ignoreSelectors: input.ignoreSelectors,
     ignoreAttributes: input.ignoreAttributes,
     ignoreRegexes: input.ignoreRegexes,
