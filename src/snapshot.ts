@@ -8,6 +8,7 @@ import { stableStringifyJson } from './stable_json.js';
 import { assertSafeHttpUrl } from './url_safety.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
 import { normalizeHttpUrl } from './url_normalize.js';
+import { waitForPoliteness } from './politeness.js';
 import { Actor } from 'apify';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 import type { SentinelInput, Snapshot } from './types.js';
@@ -74,6 +75,8 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     ignore_regexes,
     max_redirects,
     max_content_bytes,
+    politeness_delay_ms,
+    politeness_jitter_ms,
     min_text_length,
     on_empty_snapshot,
     fields,
@@ -128,6 +131,7 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), fetch_timeout_secs * 1000);
           try {
+            await waitForPoliteness(currentUrl, politeness_delay_ms, politeness_jitter_ms);
             const res = await fetch(currentUrl, {
               method: 'GET',
               redirect: 'manual',

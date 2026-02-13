@@ -105,6 +105,8 @@ const rawInputSchema = z
 
     max_redirects: z.coerce.number().int().min(0).optional(),
     max_content_bytes: z.coerce.number().int().min(1).optional(),
+    politeness_delay_ms: z.coerce.number().int().min(0).optional(),
+    politeness_jitter_ms: z.coerce.number().int().min(0).optional(),
     max_payload_bytes: z.coerce.number().int().min(1024).optional(),
     reset_baseline: z.coerce.boolean().optional(),
     min_text_length: z.coerce.number().int().min(0).optional(),
@@ -187,6 +189,8 @@ export function parseInput(raw: unknown): SentinelInput {
 
     max_redirects: parsed.max_redirects ?? 5,
     max_content_bytes: parsed.max_content_bytes ?? 2_000_000,
+    politeness_delay_ms: parsed.politeness_delay_ms ?? 0,
+    politeness_jitter_ms: parsed.politeness_jitter_ms ?? 0,
     max_payload_bytes: parsed.max_payload_bytes ?? 250_000,
     reset_baseline: parsed.reset_baseline ?? false,
     min_text_length: parsed.min_text_length ?? 0,

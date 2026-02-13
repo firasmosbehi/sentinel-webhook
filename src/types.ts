@@ -67,6 +67,8 @@ export type SentinelInput = {
 
   max_redirects: number;
   max_content_bytes: number;
+  politeness_delay_ms: number;
+  politeness_jitter_ms: number;
   max_payload_bytes: number;
   reset_baseline: boolean;
   min_text_length: number;

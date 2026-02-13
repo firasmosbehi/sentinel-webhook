@@ -32,6 +32,8 @@
   "webhook_retry_on_5xx": true,
   "max_redirects": 5,
   "max_content_bytes": 2000000,
+  "politeness_delay_ms": 0,
+  "politeness_jitter_ms": 0,
   "max_payload_bytes": 250000,
   "reset_baseline": false,
   "min_text_length": 0,

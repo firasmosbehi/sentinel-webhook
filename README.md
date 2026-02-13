@@ -15,6 +15,7 @@ simple "URL in, webhook out" change-detection bridge.
 - `selector` (optional): CSS selector to scope what is monitored (e.g. `.price`).
 - `fields` (optional): Structured extraction (CSS selectors + optional attributes) to produce a clean field-level diff.
 - `ignore_json_paths` (optional): JSON Pointer paths to ignore when monitoring `application/json` endpoints (e.g. `/meta/timestamp`).
+- `politeness_delay_ms` (optional): Add a minimum delay between requests to the same hostname during a run (helps avoid rate limits).
 - `webhook_url`: Callback URL to POST change events to.
 
 ## Webhook Payload

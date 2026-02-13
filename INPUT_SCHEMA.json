@@ -223,6 +223,20 @@
       "default": 2000000,
       "minimum": 1
     },
+    "politeness_delay_ms": {
+      "title": "Politeness delay (ms)",
+      "type": "integer",
+      "description": "Minimum delay between requests to the same hostname during this Actor run (helps avoid rate limits when monitoring multiple URLs/domains).",
+      "default": 0,
+      "minimum": 0
+    },
+    "politeness_jitter_ms": {
+      "title": "Politeness jitter (ms)",
+      "type": "integer",
+      "description": "Optional random jitter added to politeness_delay_ms (0..politeness_jitter_ms).",
+      "default": 0,
+      "minimum": 0
+    },
     "max_payload_bytes": {
       "title": "Max payload bytes",
       "type": "integer",
