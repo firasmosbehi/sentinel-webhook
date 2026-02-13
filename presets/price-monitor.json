@@ -1,0 +1,12 @@
+{
+  "mode": "monitor",
+  "target_url": "https://example.com/product/123",
+  "fields": [{ "name": "price", "selector": ".price", "type": "text" }],
+  "webhook_url": "https://example.com/webhook",
+  "baseline_mode": "store_only",
+  "history_mode": "changes_only",
+  "rendering_mode": "static",
+  "max_payload_bytes": 250000,
+  "ignore_regex_presets": ["tokens", "timestamps"]
+}
+

@@ -1,0 +1,12 @@
+{
+  "mode": "monitor",
+  "target_url": "https://example.com/grants",
+  "selector": "main",
+  "webhook_url": "https://example.com/webhook",
+  "baseline_mode": "store_only",
+  "history_mode": "changes_only",
+  "rendering_mode": "static",
+  "ignore_regex_presets": ["timestamps", "tokens"],
+  "ignore_selectors": [".last-updated", ".newsletter-signup"]
+}
+

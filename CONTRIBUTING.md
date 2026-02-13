@@ -10,8 +10,18 @@ Thanks for considering contributing.
 
 ## Development Setup
 
-This repository is currently a scaffold. Once the first runnable implementation
-lands, this file will include exact setup and test commands.
+Requirements:
+- Node.js `>=20`
+
+Commands:
+- Install: `npm install`
+- Lint: `npm run lint`
+- Build: `npm run build`
+- Test: `npm test`
+
+Local run:
+- `cp INPUT.example.json INPUT.json`
+- `npm run dev`
 
 ## Pull Requests
 
@@ -19,3 +29,15 @@ lands, this file will include exact setup and test commands.
 - Include test coverage where it makes sense.
 - Avoid including secrets or credentials in commits.
 
+## Issue Triage
+
+When filing an issue, include:
+- The exact input (sanitized), especially `target_url`, `selector`, and ignore rules.
+- A sample payload (if relevant) with `event_id`.
+- Whether you used `static` or `playwright` mode.
+- Expected vs actual behavior.
+
+Labeling conventions:
+- `priority:P0|P1|P2`
+- `area:*` (security, reliability, webhook, diffing, docs, ...)
+- `mvp|v1|v2|launch`

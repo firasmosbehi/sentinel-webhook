@@ -1,0 +1,27 @@
+changelog:
+  categories:
+    - title: "Security"
+      labels:
+        - "area:security"
+    - title: "Reliability"
+      labels:
+        - "area:reliability"
+    - title: "Webhook"
+      labels:
+        - "area:webhook"
+    - title: "Diffing / Noise"
+      labels:
+        - "area:diffing"
+        - "area:noise"
+    - title: "Rendering / Snapshot"
+      labels:
+        - "area:rendering"
+        - "area:snapshot"
+    - title: "Docs"
+      labels:
+        - "documentation"
+        - "area:docs"
+    - title: "Other"
+      labels:
+        - "*"
+

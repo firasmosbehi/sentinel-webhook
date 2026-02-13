@@ -1,5 +1,9 @@
 # Sentinel Webhook
 
+![CI](https://github.com/firasmosbehi/sentinel-webhook/actions/workflows/ci.yml/badge.svg)
+![Version](https://img.shields.io/github/package-json/v/firasmosbehi/sentinel-webhook)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+
 Turn any static web URL into a developer-friendly webhook that fires only when
 meaningful changes are detected.
 
@@ -65,12 +69,17 @@ MVP implemented (Apify Actor + stateful diffing via Key-Value Store).
 - Webhook payload: `docs/webhook-payload.md`
 - Security model: `docs/security.md`
 - Signature verification: `docs/signature-verification.md`
+- Migration policy: `docs/migration.md`
 - Privacy: `docs/privacy.md`
 - Limitations: `docs/limitations.md`
 - Zapier guide: `docs/integrations/zapier.md`
 - Make.com guide: `docs/integrations/make.md`
 - Recipe (price drop -> Zapier): `docs/recipes/competitor-price-drop-zapier.md`
+- Recipe (job listings -> Slack/Discord): `docs/recipes/job-listings-slack-discord.md`
+- Recipe (grants -> email): `docs/recipes/government-grants-email.md`
+- Tutorial (competitor pricing monitor): `docs/tutorials/competitor-pricing-monitor.md`
 - Example receiver (Express): `examples/express-receiver/README.md`
+- Input presets: `presets/`
 
 ## Local Development
 
