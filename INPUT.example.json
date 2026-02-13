@@ -1,4 +1,5 @@
 {
+  "mode": "monitor",
   "target_url": "https://example.com",
   "selector": "h1",
   "targets": [],
@@ -20,6 +21,9 @@
   "baseline_mode": "store_only",
   "state_store_name": "sentinel-state",
   "dead_letter_dataset_name": "sentinel-dead-letter",
+  "replay_limit": 100,
+  "replay_use_stored_webhook_url": true,
+  "replay_dry_run": false,
   "history_dataset_name": "sentinel-history",
   "history_mode": "changes_only",
 

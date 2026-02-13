@@ -4,6 +4,7 @@ import type {
   HistoryMode,
   IgnoreRegexPreset,
   OnEmptySnapshotBehavior,
+  RunMode,
   RenderingMode,
   SentinelInput,
   WaitUntil,
@@ -28,6 +29,8 @@ const historyModeSchema: z.ZodType<HistoryMode> = z.union([
   z.literal('changes_only'),
   z.literal('all_events'),
 ]);
+
+const modeSchema: z.ZodType<RunMode> = z.union([z.literal('monitor'), z.literal('replay_dead_letter')]);
 
 const renderingModeSchema: z.ZodType<RenderingMode> = z.union([z.literal('static'), z.literal('playwright')]);
 
@@ -77,6 +80,7 @@ const targetSpecSchema = z
 
 const rawInputSchema = z
   .object({
+    mode: modeSchema.optional(),
     target_url: httpUrl.optional(),
     selector: z.string().trim().min(1).optional(),
     targets: z.array(targetSpecSchema).min(1).optional(),
@@ -104,6 +108,9 @@ const rawInputSchema = z
     baseline_mode: baselineModeSchema.optional(),
     state_store_name: z.string().trim().min(1).optional(),
     dead_letter_dataset_name: z.string().trim().min(1).optional(),
+    replay_limit: z.coerce.number().int().min(1).optional(),
+    replay_use_stored_webhook_url: z.coerce.boolean().optional(),
+    replay_dry_run: z.coerce.boolean().optional(),
     history_dataset_name: z.string().trim().min(1).optional(),
     history_mode: historyModeSchema.optional(),
 
@@ -144,12 +151,14 @@ const rawInputSchema = z
     debug: z.coerce.boolean().optional(),
   })
   .strict()
-  .refine((d) => !!d.target_url || (Array.isArray(d.targets) && d.targets.length > 0), {
+  .refine((d) => d.mode === 'replay_dead_letter' || !!d.target_url || (Array.isArray(d.targets) && d.targets.length > 0), {
     message: 'Provide target_url or non-empty targets[]',
   });
 
 export function parseInput(raw: unknown): SentinelInput {
   const parsed = rawInputSchema.parse(raw ?? {});
+
+  const mode = parsed.mode ?? 'monitor';
 
   const timeout_secs = parsed.timeout_secs ?? 30;
   const max_retries = parsed.max_retries ?? 3;
@@ -189,13 +198,14 @@ export function parseInput(raw: unknown): SentinelInput {
   }
 
   const primaryTargetUrl = targets[0]?.target_url;
-  if (!primaryTargetUrl) {
+  if (!primaryTargetUrl && mode === 'monitor') {
     // Should be prevented by schema refine, but keep a defensive runtime guard.
     throw new Error('Provide target_url or non-empty targets[]');
   }
 
   return {
-    target_url: primaryTargetUrl,
+    mode,
+    target_url: primaryTargetUrl ?? 'https://example.com/',
     selector: parsed.selector,
     targets,
     rendering_mode: parsed.rendering_mode ?? 'static',
@@ -221,6 +231,9 @@ export function parseInput(raw: unknown): SentinelInput {
     baseline_mode: parsed.baseline_mode ?? 'store_only',
     state_store_name: parsed.state_store_name ?? 'sentinel-state',
     dead_letter_dataset_name: parsed.dead_letter_dataset_name ?? 'sentinel-dead-letter',
+    replay_limit: parsed.replay_limit ?? 100,
+    replay_use_stored_webhook_url: parsed.replay_use_stored_webhook_url ?? true,
+    replay_dry_run: parsed.replay_dry_run ?? false,
     history_dataset_name: parsed.history_dataset_name ?? 'sentinel-history',
     history_mode: parsed.history_mode ?? 'changes_only',
 

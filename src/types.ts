@@ -2,6 +2,8 @@ export type BaselineMode = 'store_only' | 'notify';
 
 export type HistoryMode = 'none' | 'changes_only' | 'all_events';
 
+export type RunMode = 'monitor' | 'replay_dead_letter';
+
 export type RenderingMode = 'static' | 'playwright';
 
 export type WaitUntil = 'domcontentloaded' | 'load' | 'networkidle';
@@ -38,6 +40,7 @@ export type TargetInput = {
 };
 
 export type SentinelInput = {
+  mode: RunMode;
   target_url: string;
   selector?: string;
   targets: TargetInput[];
@@ -57,6 +60,9 @@ export type SentinelInput = {
   baseline_mode: BaselineMode;
   state_store_name: string;
   dead_letter_dataset_name: string;
+  replay_limit: number;
+  replay_use_stored_webhook_url: boolean;
+  replay_dry_run: boolean;
   history_dataset_name: string;
   history_mode: HistoryMode;
 

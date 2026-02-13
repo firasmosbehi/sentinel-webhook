@@ -3,6 +3,14 @@
   "type": "object",
   "schemaVersion": 1,
   "properties": {
+    "mode": {
+      "title": "Mode",
+      "type": "string",
+      "description": "Actor mode: monitor targets for changes, or replay failed webhook deliveries from the dead-letter dataset.",
+      "editor": "select",
+      "default": "monitor",
+      "enum": ["monitor", "replay_dead_letter"]
+    },
     "target_url": {
       "title": "Target URL",
       "type": "string",
@@ -171,6 +179,25 @@
       "description": "Dataset name where failed webhook deliveries will be stored for later inspection/replay.",
       "editor": "textfield",
       "default": "sentinel-dead-letter"
+    },
+    "replay_limit": {
+      "title": "Replay limit",
+      "type": "integer",
+      "description": "Maximum number of dead-letter items to replay when mode=replay_dead_letter.",
+      "default": 100,
+      "minimum": 1
+    },
+    "replay_use_stored_webhook_url": {
+      "title": "Replay: use stored webhook_url",
+      "type": "boolean",
+      "description": "If enabled, replay uses the webhook_url stored in each dead-letter item. If disabled, replay sends all items to the current webhook_url input.",
+      "default": true
+    },
+    "replay_dry_run": {
+      "title": "Replay: dry run",
+      "type": "boolean",
+      "description": "If enabled, do not POST webhooks; only emit replay events to the run dataset.",
+      "default": false
     },
     "history_dataset_name": {
       "title": "History dataset name",

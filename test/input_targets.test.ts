@@ -43,5 +43,13 @@ describe('parseInput targets[]', () => {
     });
     expect(input.max_concurrency).toBe(3);
   });
-});
 
+  it('allows replay_dead_letter mode without targets', () => {
+    const input = parseInput({
+      mode: 'replay_dead_letter',
+      webhook_url: 'https://example.com/webhook',
+    });
+    expect(input.mode).toBe('replay_dead_letter');
+    expect(input.targets.length).toBe(0);
+  });
+});

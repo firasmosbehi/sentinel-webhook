@@ -678,6 +678,151 @@ async function processTarget(
   }
 }
 
+async function replayDeadLetters(input: SentinelInput, deps: { history: Dataset | null; dead: Dataset }): Promise<void> {
+  const { history, dead } = deps;
+
+  const pageSize = 100;
+  const wanted = Math.max(1, input.replay_limit);
+  const items: unknown[] = [];
+
+  for (let offset = 0; items.length < wanted; offset += pageSize) {
+    const res = await dead.getData({ offset, limit: Math.min(pageSize, wanted - items.length), desc: true });
+    const batch = (res.items ?? []) as unknown[];
+    if (batch.length === 0) break;
+    items.push(...batch);
+  }
+
+  log.info('Replaying dead-letter items.', { items: items.length, replay_limit: input.replay_limit });
+
+  type ReplayResult = { ok: boolean; skipped: boolean };
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function isChangePayload(value: unknown): value is ChangePayload {
+    if (!isRecord(value)) return false;
+    if (value.schema_version !== 1) return false;
+    if (typeof value.event_id !== 'string' || value.event_id.length === 0) return false;
+    if (typeof value.event !== 'string' || value.event.length === 0) return false;
+    if (typeof value.url !== 'string' || value.url.length === 0) return false;
+    if (typeof value.timestamp !== 'string' || value.timestamp.length === 0) return false;
+    if (!isRecord(value.current)) return false;
+    return true;
+  }
+
+  const results = await mapWithConcurrency<unknown, ReplayResult>(items, input.max_concurrency, async (item) => {
+    if (!isRecord(item)) {
+      await Actor.pushData({
+        event: 'DEAD_LETTER_REPLAY_SKIPPED',
+        timestamp: new Date().toISOString(),
+        reason: 'Item is not an object',
+      });
+      return { ok: false, skipped: true };
+    }
+
+    const payloadRaw = item.payload;
+    if (!isChangePayload(payloadRaw)) {
+      await Actor.pushData({
+        event: 'DEAD_LETTER_REPLAY_SKIPPED',
+        timestamp: new Date().toISOString(),
+        reason: 'Missing or invalid payload',
+      });
+      return { ok: false, skipped: true };
+    }
+
+    const eventId = payloadRaw.event_id;
+    const storedWebhookUrl = typeof item.webhook_url === 'string' ? item.webhook_url : null;
+    const webhookUrl =
+      input.replay_use_stored_webhook_url && typeof storedWebhookUrl === 'string' && storedWebhookUrl.length > 0
+        ? storedWebhookUrl
+        : input.webhook_url;
+
+    const replayInput: SentinelInput = { ...input, webhook_url: webhookUrl };
+
+    if (input.replay_dry_run) {
+      await Actor.pushData({
+        event: 'DEAD_LETTER_REPLAY_DRY_RUN',
+        timestamp: new Date().toISOString(),
+        webhook_url: safeUrl(webhookUrl, input.redact_logs),
+        event_id: eventId,
+      });
+      return { ok: true, skipped: false };
+    }
+
+    try {
+      const delivery = await sendWebhook(replayInput, payloadRaw);
+      await Actor.pushData({
+        event: 'DEAD_LETTER_REPLAY_OK',
+        timestamp: new Date().toISOString(),
+        webhook_url: safeUrl(webhookUrl, input.redact_logs),
+        event_id: eventId,
+        delivery,
+      });
+
+      if (history && input.history_mode === 'all_events') {
+        await history.pushData({
+          event: 'DEAD_LETTER_REPLAY_OK',
+          timestamp: new Date().toISOString(),
+          webhook_url: safeUrl(webhookUrl, input.redact_logs),
+          event_id: eventId,
+          delivery,
+        });
+      }
+
+      return { ok: true, skipped: false };
+    } catch (err) {
+      const safeErr = toSafeError(err, input.redact_logs);
+      await Actor.pushData({
+        event: 'DEAD_LETTER_REPLAY_FAILED',
+        timestamp: new Date().toISOString(),
+        webhook_url: safeUrl(webhookUrl, input.redact_logs),
+        event_id: eventId,
+        error: safeErr,
+      });
+
+      if (history && input.history_mode === 'all_events') {
+        await history.pushData({
+          event: 'DEAD_LETTER_REPLAY_FAILED',
+          timestamp: new Date().toISOString(),
+          webhook_url: safeUrl(webhookUrl, input.redact_logs),
+          event_id: eventId,
+          error: safeErr,
+        });
+      }
+
+      return { ok: false, skipped: false };
+    }
+  });
+
+  const ok = results.filter((r) => r.ok).length;
+  const skipped = results.filter((r) => r.skipped).length;
+  const failed = results.length - ok - skipped;
+
+  const timestamp = new Date().toISOString();
+  await Actor.pushData({
+    event: 'DEAD_LETTER_REPLAY_SUMMARY',
+    timestamp,
+    total: results.length,
+    ok,
+    failed,
+    skipped,
+    dry_run: input.replay_dry_run,
+  });
+
+  if (history && input.history_mode === 'all_events') {
+    await history.pushData({
+      event: 'DEAD_LETTER_REPLAY_SUMMARY',
+      timestamp,
+      total: results.length,
+      ok,
+      failed,
+      skipped,
+      dry_run: input.replay_dry_run,
+    });
+  }
+}
+
 await Actor.main(async () => {
   const raw = (await Actor.getInput()) ?? (await loadFallbackInput());
   if (raw == null) {
@@ -695,13 +840,19 @@ await Actor.main(async () => {
     denylist: input.webhook_domain_denylist,
   });
 
+  const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
+  const dead = await Actor.openDataset(input.dead_letter_dataset_name);
+
+  if (input.mode === 'replay_dead_letter') {
+    await replayDeadLetters(input, { history, dead });
+    return;
+  }
+
   if (input.targets.length === 0) {
     throw new Error('No targets provided. Provide target_url or non-empty targets[].');
   }
 
   const kv = await Actor.openKeyValueStore(input.state_store_name);
-  const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
-  const dead = await Actor.openDataset(input.dead_letter_dataset_name);
 
   const targetInputs = input.targets.map((t) => materializeTargetInput(input, t));
   log.info('Processing targets.', { targets: targetInputs.length, max_concurrency: input.max_concurrency });

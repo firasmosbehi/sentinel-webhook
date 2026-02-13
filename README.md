@@ -11,6 +11,7 @@ simple "URL in, webhook out" change-detection bridge.
 
 ## Inputs
 
+- `mode` (optional): `monitor` (default) or `replay_dead_letter`.
 - `target_url`: URL to monitor.
 - `selector` (optional): CSS selector to scope what is monitored (e.g. `.price`).
 - `targets` (optional): Multi-target mode. Provide an array of `{ target_url, selector?, fields?, ignore_json_paths? }`.
@@ -20,6 +21,7 @@ simple "URL in, webhook out" change-detection bridge.
 - `ignore_json_paths` (optional): JSON Pointer paths to ignore when monitoring `application/json` endpoints (e.g. `/meta/timestamp`).
 - `politeness_delay_ms` (optional): Add a minimum delay between requests to the same hostname during a run (helps avoid rate limits).
 - `max_concurrency` (optional): Concurrency for `targets[]` processing (default `1`).
+- `replay_limit` / `replay_use_stored_webhook_url` / `replay_dry_run`: Replay controls when `mode=replay_dead_letter`.
 - `webhook_url`: Callback URL to POST change events to.
 
 ## Webhook Payload
