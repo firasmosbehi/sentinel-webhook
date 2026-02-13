@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/firasmosbehi/sentinel-webhook/schemas/webhook-payload.schema.json",
+  "title": "Sentinel Webhook Payload",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "event_id": { "type": "string", "minLength": 1 },
+    "event": { "type": "string", "enum": ["CHANGE_DETECTED", "BASELINE_STORED"] },
+    "url": { "type": "string", "format": "uri" },
+    "selector": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "payload_truncated": { "type": "boolean" },
+    "changes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "old": { "type": "string" },
+            "new": { "type": "string" },
+            "delta": { "type": "number" }
+          },
+          "required": ["old", "new"]
+        }
+      },
+      "required": ["text"]
+    },
+    "previous": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contentHash": { "type": "string" },
+        "fetchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["contentHash", "fetchedAt"]
+    },
+    "current": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contentHash": { "type": "string" },
+        "fetchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["contentHash", "fetchedAt"]
+    }
+  },
+  "required": ["schema_version", "event_id", "event", "url", "timestamp", "current"]
+}
+

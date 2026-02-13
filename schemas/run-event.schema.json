@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/firasmosbehi/sentinel-webhook/schemas/run-event.schema.json",
+  "title": "Sentinel Run Event (Dataset Item)",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "event": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "stateKey": { "type": "string" },
+    "url": { "type": "string" },
+    "target_url": { "type": "string" },
+    "webhook_url": { "type": "string" },
+    "selector": { "type": "string" },
+    "fetch": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "statusCode": { "type": "integer" },
+        "finalUrl": { "type": "string" },
+        "redirectCount": { "type": "integer" },
+        "bytesRead": { "type": "integer" },
+        "durationMs": { "type": "integer" },
+        "attempts": { "type": "integer" },
+        "notModified": { "type": "boolean" }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "attempts": { "type": "integer" },
+        "durationMs": { "type": "integer" },
+        "statusCode": { "type": "integer" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string" },
+        "message": { "type": "string" },
+        "statusCode": { "type": "integer" },
+        "attempts": { "type": "integer" },
+        "durationMs": { "type": "integer" }
+      }
+    }
+  },
+  "required": ["event", "timestamp"]
+}
+

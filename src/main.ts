@@ -39,11 +39,36 @@ function safeUrl(rawUrl: string, redact: boolean): string {
   return redact ? redactUrl(rawUrl) : rawUrl;
 }
 
-function toSafeError(err: unknown, redact: boolean): { name: string; message: string; statusCode?: number } {
+function snapshotFetchMetrics(snapshot: Snapshot, redact: boolean): {
+  statusCode: number;
+  finalUrl?: string;
+  redirectCount?: number;
+  bytesRead?: number;
+  durationMs?: number;
+  attempts?: number;
+  notModified?: boolean;
+} {
+  return {
+    statusCode: snapshot.statusCode,
+    finalUrl: snapshot.finalUrl ? safeUrl(snapshot.finalUrl, redact) : undefined,
+    redirectCount: snapshot.redirectCount,
+    bytesRead: snapshot.bytesRead,
+    durationMs: snapshot.fetchDurationMs,
+    attempts: snapshot.fetchAttempts,
+    notModified: snapshot.notModified,
+  };
+}
+
+function toSafeError(
+  err: unknown,
+  redact: boolean,
+): { name: string; message: string; statusCode?: number; attempts?: number; durationMs?: number } {
   const statusCode = err instanceof WebhookDeliveryError ? err.statusCode : undefined;
+  const attempts = err instanceof WebhookDeliveryError ? err.attempts : undefined;
+  const durationMs = err instanceof WebhookDeliveryError ? err.durationMs : undefined;
   const e = toError(err);
   const message = redact ? redactText(e.message) : e.message;
-  return { name: e.name, message, statusCode };
+  return { name: e.name, message, statusCode, attempts, durationMs };
 }
 
 function buildDeadLetterPayloadPreview(payload: ChangePayload, redact: boolean): { payload: ChangePayload; truncated: boolean } {
@@ -240,6 +265,7 @@ await Actor.main(async () => {
     await Actor.pushData({
       ...payload,
       url: safeUrl(payload.url, input.redact_logs),
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       stateKey,
     });
 
@@ -256,6 +282,7 @@ await Actor.main(async () => {
           url: safeUrl(payload.url, input.redact_logs),
           selector: payload.selector,
           payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
           webhook_url: safeUrl(input.webhook_url, input.redact_logs),
           delivered: true,
           delivery,
@@ -271,6 +298,7 @@ await Actor.main(async () => {
           webhook_url: safeUrl(input.webhook_url, input.redact_logs),
           target_url: safeUrl(input.target_url, input.redact_logs),
           selector: input.selector,
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
           error: safeErr,
           payload: preview.payload,
           payload_truncated: preview.truncated,
@@ -283,6 +311,7 @@ await Actor.main(async () => {
           webhook_url: safeUrl(input.webhook_url, input.redact_logs),
           target_url: safeUrl(input.target_url, input.redact_logs),
           selector: input.selector,
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
           error: safeErr,
         });
 
@@ -300,6 +329,7 @@ await Actor.main(async () => {
           url: safeUrl(payload.url, input.redact_logs),
           selector: payload.selector,
           payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
           webhook_url: safeUrl(input.webhook_url, input.redact_logs),
           delivered: false,
           error: safeErr,
@@ -314,6 +344,7 @@ await Actor.main(async () => {
         url: safeUrl(payload.url, input.redact_logs),
         selector: payload.selector,
         payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
         delivered: false,
         webhook_skipped: true,
@@ -333,6 +364,7 @@ await Actor.main(async () => {
       timestamp: new Date().toISOString(),
       previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
       current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       stateKey,
     });
 
@@ -345,6 +377,7 @@ await Actor.main(async () => {
         selector: input.selector,
         previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
         current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
       });
     }
 
@@ -366,6 +399,7 @@ await Actor.main(async () => {
         min_change_ratio: input.min_change_ratio,
         previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
         current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
         stateKey,
       });
 
@@ -380,6 +414,7 @@ await Actor.main(async () => {
           min_change_ratio: input.min_change_ratio,
           previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
           current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
         });
       }
 
@@ -409,8 +444,9 @@ await Actor.main(async () => {
 
   const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
 
+  let delivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
   try {
-    const delivery = await sendWebhook(input, payload);
+    delivery = await sendWebhook(input, payload);
     log.info('Change detected; webhook delivered.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
 
     await pushHistory({
@@ -421,6 +457,7 @@ await Actor.main(async () => {
       url: safeUrl(payload.url, input.redact_logs),
       selector: payload.selector,
       payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       webhook_url: safeUrl(input.webhook_url, input.redact_logs),
       delivered: true,
       delivery,
@@ -436,6 +473,7 @@ await Actor.main(async () => {
       webhook_url: safeUrl(input.webhook_url, input.redact_logs),
       target_url: safeUrl(input.target_url, input.redact_logs),
       selector: input.selector,
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       error: safeErr,
       payload: preview.payload,
       payload_truncated: preview.truncated,
@@ -448,6 +486,7 @@ await Actor.main(async () => {
       webhook_url: safeUrl(input.webhook_url, input.redact_logs),
       target_url: safeUrl(input.target_url, input.redact_logs),
       selector: input.selector,
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       error: safeErr,
     });
 
@@ -465,6 +504,7 @@ await Actor.main(async () => {
       url: safeUrl(payload.url, input.redact_logs),
       selector: payload.selector,
       payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+      fetch: snapshotFetchMetrics(current, input.redact_logs),
       webhook_url: safeUrl(input.webhook_url, input.redact_logs),
       delivered: false,
       error: safeErr,
@@ -477,6 +517,8 @@ await Actor.main(async () => {
   await Actor.pushData({
     ...payload,
     url: safeUrl(payload.url, input.redact_logs),
+    fetch: snapshotFetchMetrics(current, input.redact_logs),
+    webhook: delivery,
     stateKey,
   });
 });

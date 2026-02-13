@@ -96,12 +96,24 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     ? new ProxyAgent({ uri: proxyUrl, connectTimeout: connectTimeoutMs })
     : new Agent({ connectTimeout: connectTimeoutMs });
 
-  let result: { status: number; headers: Headers; text: string; notModified: boolean };
+  const startedAt = Date.now();
+  let attempts = 0;
+  let result: {
+    status: number;
+    headers: Headers;
+    text: string;
+    notModified: boolean;
+    bytesRead: number;
+    finalUrl: string;
+    redirectCount: number;
+  };
   try {
     result = await withRetries(
-      async () => {
+      async (attempt) => {
+        attempts = attempt + 1;
         let currentUrl = target_url;
         for (let i = 0; i <= max_redirects; i++) {
+          const redirectCount = i;
           assertUrlAllowedByDomainPolicy(currentUrl, 'target_url', {
             allowlist: target_domain_allowlist,
             denylist: target_domain_denylist,
@@ -135,15 +147,31 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
 
             if (res.status === 304) {
               if (!previous) throw new HttpError('Received 304 Not Modified but no previous snapshot exists', res.status);
-              return { status: res.status, headers: res.headers, text: '', notModified: true };
+              return {
+                status: res.status,
+                headers: res.headers,
+                text: '',
+                notModified: true,
+                bytesRead: 0,
+                finalUrl: currentUrl,
+                redirectCount,
+              };
             }
 
             if (res.status >= 400) {
               throw new HttpError(`Fetch failed with status ${res.status}`, res.status);
             }
 
-            const { text } = await readResponseTextWithLimit(res, max_content_bytes);
-            return { status: res.status, headers: res.headers, text, notModified: false };
+            const { text, bytesRead } = await readResponseTextWithLimit(res, max_content_bytes);
+            return {
+              status: res.status,
+              headers: res.headers,
+              text,
+              notModified: false,
+              bytesRead,
+              finalUrl: currentUrl,
+              redirectCount,
+            };
           } finally {
             clearTimeout(timeout);
           }
@@ -166,7 +194,8 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     }
   }
 
-  const { status, headers, text: html, notModified } = result;
+  const { status, headers, text: html, notModified, bytesRead, finalUrl, redirectCount } = result;
+  const fetchDurationMs = Date.now() - startedAt;
 
   const fetchedAt = new Date().toISOString();
 
@@ -177,6 +206,12 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
       selector,
       fetchedAt,
       statusCode: status,
+      finalUrl,
+      redirectCount,
+      bytesRead,
+      fetchDurationMs,
+      fetchAttempts: attempts,
+      notModified: true,
       contentType: headers.get('content-type') ?? previous.contentType,
       etag: headers.get('etag') ?? previous.etag,
       lastModified: headers.get('last-modified') ?? previous.lastModified,
@@ -219,6 +254,12 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     selector,
     fetchedAt,
     statusCode: status,
+    finalUrl,
+    redirectCount,
+    bytesRead,
+    fetchDurationMs,
+    fetchAttempts: attempts,
+    notModified: false,
     contentType: headers.get('content-type') ?? undefined,
     etag: headers.get('etag') ?? undefined,
     lastModified: headers.get('last-modified') ?? undefined,

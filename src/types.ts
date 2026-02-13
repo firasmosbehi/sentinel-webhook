@@ -72,6 +72,12 @@ export type Snapshot = {
   selector?: string;
   fetchedAt: string;
   statusCode: number;
+  finalUrl?: string;
+  redirectCount?: number;
+  bytesRead?: number;
+  fetchDurationMs?: number;
+  fetchAttempts?: number;
+  notModified?: boolean;
   contentType?: string;
   etag?: string;
   lastModified?: string;

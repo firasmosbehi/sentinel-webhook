@@ -9,29 +9,38 @@ Most websites don't push events. Developers end up writing polling jobs, storing
 previous state, diffing HTML, and dealing with noise. Sentinel aims to provide a
 simple "URL in, webhook out" change-detection bridge.
 
-## Planned Inputs
+## Inputs
 
 - `target_url`: URL to monitor.
 - `selector` (optional): CSS selector to scope what is monitored (e.g. `.price`).
 - `webhook_url`: Callback URL to POST change events to.
 
-## Planned Output (Webhook Payload)
+## Webhook Payload
 
 ```json
 {
+  "schema_version": 1,
+  "event_id": "…",
   "event": "CHANGE_DETECTED",
   "url": "https://example.com/product/xyz",
   "timestamp": "2026-05-12T10:00:00Z",
   "changes": {
-    "price": { "old": 49.99, "new": 45.0, "delta": -4.99 },
-    "stock_status": { "old": "In Stock", "new": "Low Inventory" }
-  }
+    "text": {
+      "old": "Old text…",
+      "new": "New text…",
+      "delta": -4.99
+    }
+  },
+  "previous": { "contentHash": "…", "fetchedAt": "2026-05-12T09:45:00Z" },
+  "current": { "contentHash": "…", "fetchedAt": "2026-05-12T10:00:00Z" }
 }
 ```
 
+JSON Schema: `schemas/webhook-payload.schema.json`
+
 ## Status
 
-MVP implementation in progress (Apify Actor + stateful diffing via Key-Value Store).
+MVP implemented (Apify Actor + stateful diffing via Key-Value Store).
 
 ## Local Development
 
