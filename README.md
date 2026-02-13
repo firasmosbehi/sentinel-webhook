@@ -57,6 +57,20 @@ JSON Schema: `schemas/webhook-payload.schema.json`
 
 MVP implemented (Apify Actor + stateful diffing via Key-Value Store).
 
+## Documentation
+
+- Quickstart: `docs/quickstart.md`
+- Input reference: `docs/input-reference.md`
+- Webhook payload: `docs/webhook-payload.md`
+- Security model: `docs/security.md`
+- Signature verification: `docs/signature-verification.md`
+- Privacy: `docs/privacy.md`
+- Limitations: `docs/limitations.md`
+- Zapier guide: `docs/integrations/zapier.md`
+- Make.com guide: `docs/integrations/make.md`
+- Recipe (price drop -> Zapier): `docs/recipes/competitor-price-drop-zapier.md`
+- Example receiver (Express): `examples/express-receiver/README.md`
+
 ## Local Development
 
 ```bash

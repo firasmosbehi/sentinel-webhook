@@ -3,7 +3,7 @@ import tseslint from 'typescript-eslint';
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'storage/**', 'apify_storage_test/**'],
+    ignores: ['dist/**', 'node_modules/**', 'storage/**', 'apify_storage_test/**', 'examples/**', 'docs/**'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -16,4 +16,3 @@ export default [
     },
   },
 ];
-

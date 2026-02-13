@@ -14,13 +14,13 @@
     "target_url": {
       "title": "Target URL",
       "type": "string",
-      "description": "The URL to monitor for changes.",
+      "description": "Primary URL to monitor for changes (required unless targets[] is set or mode=replay_dead_letter).",
       "editor": "textfield"
     },
     "selector": {
       "title": "CSS selector (optional)",
       "type": "string",
-      "description": "Optional CSS selector to watch only a specific part of the page (e.g. .price, #stock-count).",
+      "description": "Default CSS selector to watch only a specific part of the page (e.g. .price, #stock-count). Can be overridden per target in targets[].",
       "editor": "textfield"
     },
     "targets": {
@@ -454,5 +454,78 @@
       "default": false
     }
   },
+  "sections": [
+    {
+      "title": "Basic",
+      "properties": ["mode", "target_url", "targets", "selector", "webhook_url", "baseline_mode"]
+    },
+    {
+      "title": "Rendering",
+      "properties": ["rendering_mode", "wait_until", "wait_for_selector", "wait_for_selector_timeout_secs"]
+    },
+    {
+      "title": "Diffing",
+      "properties": [
+        "fields",
+        "ignore_json_paths",
+        "ignore_selectors",
+        "ignore_attributes",
+        "ignore_regex_presets",
+        "ignore_regexes",
+        "min_change_ratio"
+      ]
+    },
+    {
+      "title": "Fetching",
+      "properties": [
+        "fetch_headers",
+        "proxy_configuration",
+        "fetch_timeout_secs",
+        "fetch_connect_timeout_secs",
+        "fetch_max_retries",
+        "fetch_retry_backoff_ms",
+        "max_redirects",
+        "max_content_bytes",
+        "politeness_delay_ms",
+        "politeness_jitter_ms"
+      ]
+    },
+    {
+      "title": "Webhook",
+      "properties": [
+        "webhook_headers",
+        "webhook_secret",
+        "webhook_timeout_secs",
+        "webhook_max_retries",
+        "webhook_retry_backoff_ms",
+        "webhook_retry_on_statuses",
+        "webhook_retry_on_5xx",
+        "webhook_max_retry_time_secs",
+        "max_payload_bytes"
+      ]
+    },
+    {
+      "title": "Storage",
+      "properties": ["state_store_name", "dead_letter_dataset_name", "history_dataset_name", "history_mode", "reset_baseline"]
+    },
+    {
+      "title": "Dead-Letter Replay",
+      "properties": ["replay_limit", "replay_use_stored_webhook_url", "replay_dry_run"]
+    },
+    {
+      "title": "Security",
+      "properties": [
+        "target_domain_allowlist",
+        "target_domain_denylist",
+        "webhook_domain_allowlist",
+        "webhook_domain_denylist",
+        "redact_logs"
+      ]
+    },
+    {
+      "title": "Advanced",
+      "properties": ["max_concurrency", "min_text_length", "on_empty_snapshot", "timeout_secs", "max_retries", "retry_backoff_ms", "debug"]
+    }
+  ],
   "required": ["webhook_url"]
 }

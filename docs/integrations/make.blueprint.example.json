@@ -1,0 +1,27 @@
+{
+  "note": "This is an illustrative example, not an official Make.com export. Use it as a template for your scenario steps.",
+  "modules": [
+    {
+      "type": "webhook.custom",
+      "name": "Sentinel Webhook",
+      "outputs": ["event_id", "event", "url", "changes"]
+    },
+    {
+      "type": "datastore.get",
+      "name": "Check event_id",
+      "key": "{{event_id}}"
+    },
+    {
+      "type": "router",
+      "name": "If new event_id",
+      "condition": "datastore.get.missing == true"
+    },
+    {
+      "type": "datastore.set",
+      "name": "Store event_id",
+      "key": "{{event_id}}",
+      "value": "{{timestamp}}"
+    }
+  ]
+}
+
