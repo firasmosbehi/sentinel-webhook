@@ -70,6 +70,27 @@
       "default": "static",
       "enum": ["static", "playwright"]
     },
+    "wait_until": {
+      "title": "Wait until (Playwright)",
+      "type": "string",
+      "description": "Playwright navigation waitUntil strategy used when rendering_mode=playwright.",
+      "editor": "select",
+      "default": "domcontentloaded",
+      "enum": ["domcontentloaded", "load", "networkidle"]
+    },
+    "wait_for_selector": {
+      "title": "Wait for selector (Playwright, optional)",
+      "type": "string",
+      "description": "Optional selector to wait for before extracting content (only used when rendering_mode=playwright). If omitted, Sentinel will use selector (when set).",
+      "editor": "textfield"
+    },
+    "wait_for_selector_timeout_secs": {
+      "title": "Wait for selector timeout (seconds)",
+      "type": "integer",
+      "description": "Timeout for wait_for_selector (only used when rendering_mode=playwright).",
+      "default": 10,
+      "minimum": 1
+    },
     "fetch_headers": {
       "title": "Fetch headers (optional)",
       "type": "object",

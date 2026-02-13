@@ -11,6 +11,7 @@ import { normalizeHttpUrl } from './url_normalize.js';
 import { waitForPoliteness } from './politeness.js';
 import { Actor } from 'apify';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
+import type { Route } from 'playwright';
 import type { SentinelInput, Snapshot } from './types.js';
 
 export class HttpError extends Error {
@@ -49,14 +50,80 @@ function isRetryableFetchError(err: unknown): boolean {
   // Node's fetch may surface AbortError on timeouts; retry those.
   if (err instanceof Error && err.name === 'AbortError') return true;
 
+  // Playwright uses TimeoutError for navigation/wait failures.
+  if (err instanceof Error && err.name === 'TimeoutError') return true;
+
   return false;
 }
 
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 
+async function resolveProxyUrl(proxy_configuration: SentinelInput['proxy_configuration']): Promise<string | null> {
+  if (!proxy_configuration) return null;
+
+  if (proxy_configuration.proxy_urls && proxy_configuration.proxy_urls.length > 0) {
+    return proxy_configuration.proxy_urls[0] ?? null;
+  }
+
+  if (proxy_configuration.use_apify_proxy) {
+    const cfg = await Actor.createProxyConfiguration({
+      useApifyProxy: true,
+      apifyProxyGroups: proxy_configuration.apify_proxy_groups,
+      apifyProxyCountry: proxy_configuration.apify_proxy_country,
+    });
+    if (!cfg) throw new Error('Proxy configuration requested but could not be created.');
+    const next = await cfg.newUrl();
+    if (!next) throw new Error('Proxy configuration did not produce a proxy URL.');
+    return next;
+  }
+
+  return null;
+}
+
+function countRedirectsFromRequest(req: { redirectedFrom?: () => unknown | null } | null): number {
+  let count = 0;
+  let cur: unknown = req?.redirectedFrom?.() ?? null;
+  while (cur) {
+    count += 1;
+    cur = (cur as { redirectedFrom?: () => unknown | null }).redirectedFrom?.() ?? null;
+  }
+  return count;
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const want = name.toLowerCase();
+  return Object.keys(headers).some((k) => k.toLowerCase() === want);
+}
+
+function getHeader(headers: Record<string, string>, name: string): string | undefined {
+  const want = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === want) return v;
+  }
+  return undefined;
+}
+
+function stripHeader(headers: Record<string, string>, name: string): Record<string, string> {
+  const want = name.toLowerCase();
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === want) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function toPlaywrightProxy(proxyUrl: string): { server: string; username?: string; password?: string } {
+  const u = new URL(proxyUrl);
+  const out: { server: string; username?: string; password?: string } = { server: u.origin };
+  if (u.username) out.username = u.username;
+  if (u.password) out.password = u.password;
+  return out;
+}
+
 export async function buildSnapshot(input: SentinelInput, previous: Snapshot | null = null): Promise<Snapshot> {
-  if (input.rendering_mode !== 'static') {
-    throw new Error(`rendering_mode=${input.rendering_mode} is not implemented yet`);
+  if (input.rendering_mode === 'playwright') {
+    return buildSnapshotPlaywright(input, previous);
   }
 
   const {
@@ -85,20 +152,7 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
 
   const connectTimeoutMs = fetch_connect_timeout_secs * 1000;
 
-  let proxyUrl: string | null = null;
-  if (proxy_configuration?.proxy_urls && proxy_configuration.proxy_urls.length > 0) {
-    proxyUrl = proxy_configuration.proxy_urls[0] ?? null;
-  } else if (proxy_configuration?.use_apify_proxy) {
-    const cfg = await Actor.createProxyConfiguration({
-      useApifyProxy: true,
-      apifyProxyGroups: proxy_configuration.apify_proxy_groups,
-      apifyProxyCountry: proxy_configuration.apify_proxy_country,
-    });
-    if (!cfg) throw new Error('Proxy configuration requested but could not be created.');
-    const next = await cfg.newUrl();
-    if (!next) throw new Error('Proxy configuration did not produce a proxy URL.');
-    proxyUrl = next;
-  }
+  const proxyUrl = await resolveProxyUrl(proxy_configuration);
 
   const dispatcher: Dispatcher = proxyUrl
     ? new ProxyAgent({ uri: proxyUrl, connectTimeout: connectTimeoutMs })
@@ -299,6 +353,229 @@ export async function buildSnapshot(input: SentinelInput, previous: Snapshot | n
     contentType,
     etag: headers.get('etag') ?? undefined,
     lastModified: headers.get('last-modified') ?? undefined,
+    text: extracted.text,
+    html: extracted.html,
+    contentHash: sha256Hex(extracted.text),
+  };
+}
+
+async function buildSnapshotPlaywright(input: SentinelInput, _previous: Snapshot | null = null): Promise<Snapshot> {
+  const {
+    fetch_max_retries,
+    fetch_retry_backoff_ms,
+    fetch_timeout_secs,
+    target_url,
+    selector,
+    fetch_headers,
+    proxy_configuration,
+    target_domain_allowlist,
+    target_domain_denylist,
+    max_content_bytes,
+    politeness_delay_ms,
+    politeness_jitter_ms,
+    min_text_length,
+    on_empty_snapshot,
+    fields,
+    ignore_json_paths,
+    ignore_selectors,
+    ignore_attributes,
+    ignore_regexes,
+    wait_until,
+    wait_for_selector,
+    wait_for_selector_timeout_secs,
+  } = input;
+
+  const { chromium } = await import('playwright');
+
+  // Navigation can still follow redirects; validate the initial URL up front.
+  assertUrlAllowedByDomainPolicy(target_url, 'target_url', {
+    allowlist: target_domain_allowlist,
+    denylist: target_domain_denylist,
+  });
+  await assertSafeHttpUrl(target_url, 'target_url');
+
+  const proxyUrl = await resolveProxyUrl(proxy_configuration);
+  const launchOpts: { headless: boolean; proxy?: { server: string; username?: string; password?: string } } = {
+    headless: true,
+  };
+  if (proxyUrl) launchOpts.proxy = toPlaywrightProxy(proxyUrl);
+
+  const startedAt = Date.now();
+  let attempts = 0;
+  let result: {
+    status: number;
+    headers: Record<string, string>;
+    bodyText: string;
+    bytesRead: number;
+    finalUrl: string;
+    redirectCount: number;
+  };
+
+  const browser = await chromium.launch(launchOpts);
+  try {
+    result = await withRetries(
+      async (attempt) => {
+        attempts = attempt + 1;
+
+        const userAgent =
+          getHeader(fetch_headers, 'user-agent') ?? 'SentinelWebhook/0.1 (+https://github.com/firasmosbehi/sentinel-webhook)';
+        const extraHeaders = stripHeader(fetch_headers, 'user-agent');
+        if (!hasHeader(extraHeaders, 'accept')) {
+          extraHeaders.accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+        }
+
+        const context = await browser.newContext({ userAgent, extraHTTPHeaders: extraHeaders });
+        const page = await context.newPage();
+
+        try {
+          await page.route('**/*', async (route: Route) => {
+            const url = route.request().url();
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+              await route.abort();
+              return;
+            }
+            try {
+              await assertSafeHttpUrl(url, 'playwright_request');
+            } catch {
+              await route.abort();
+              return;
+            }
+            await route.continue();
+          });
+
+          await waitForPoliteness(target_url, politeness_delay_ms, politeness_jitter_ms);
+
+          const nav = await page.goto(target_url, { waitUntil: wait_until, timeout: fetch_timeout_secs * 1000 });
+          if (!nav) throw new Error('Playwright navigation failed (no response).');
+
+          const status = nav.status();
+          if (status >= 400) throw new HttpError(`Fetch failed with status ${status}`, status);
+
+          const finalUrl = normalizeHttpUrl(nav.url());
+          assertUrlAllowedByDomainPolicy(finalUrl, 'target_url', {
+            allowlist: target_domain_allowlist,
+            denylist: target_domain_denylist,
+          });
+          await assertSafeHttpUrl(finalUrl, 'target_url');
+
+          const navHeaders = nav.headers();
+          const contentType = navHeaders['content-type'];
+          const looksJson = (contentType ?? '').toLowerCase().includes('json');
+
+          const waitSel = wait_for_selector ?? selector;
+          if (waitSel) {
+            await page.waitForSelector(waitSel, { timeout: wait_for_selector_timeout_secs * 1000 });
+          }
+
+          const bodyText = looksJson && fields.length === 0 ? await nav.text() : await page.content();
+          const bytesRead = Buffer.byteLength(bodyText, 'utf8');
+          if (bytesRead > max_content_bytes) {
+            throw new Error(`Response exceeds max_content_bytes (${bytesRead} > ${max_content_bytes})`);
+          }
+
+          const redirectCount = countRedirectsFromRequest(nav.request());
+
+          return {
+            status,
+            headers: navHeaders,
+            bodyText,
+            bytesRead,
+            finalUrl,
+            redirectCount,
+          };
+        } finally {
+          try {
+            await context.close();
+          } catch {
+            // Ignore cleanup failures.
+          }
+        }
+      },
+      {
+        maxRetries: fetch_max_retries,
+        baseBackoffMs: fetch_retry_backoff_ms,
+        shouldRetry: isRetryableFetchError,
+      },
+    );
+  } finally {
+    try {
+      await browser.close();
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+
+  const fetchDurationMs = Date.now() - startedAt;
+  const fetchedAt = new Date().toISOString();
+  const contentType = result.headers['content-type'];
+  const looksJson = (contentType ?? '').toLowerCase().includes('json');
+
+  let mode: Snapshot['mode'] = 'text';
+  let extracted: { text: string; html?: string };
+
+  if (fields.length > 0) {
+    mode = 'fields';
+    const values = extractFieldsFromHtml(result.bodyText, fields, {
+      ignoreSelectors: ignore_selectors,
+      ignoreAttributes: ignore_attributes,
+      ignoreRegexes: ignore_regexes,
+    });
+    extracted = { text: stableStringifyJson(values) };
+  } else if (looksJson) {
+    mode = 'json';
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.bodyText);
+    } catch {
+      throw new Error('Failed to parse application/json response.');
+    }
+    const sanitized = ignore_json_paths.length > 0 ? removeJsonPointerPaths(parsed, ignore_json_paths) : parsed;
+    extracted = { text: stableStringifyJson(sanitized) };
+  } else {
+    mode = 'text';
+    try {
+      extracted = normalizeHtmlToSnapshot(result.bodyText, {
+        selector,
+        ignoreSelectors: ignore_selectors,
+        ignoreAttributes: ignore_attributes,
+        ignoreRegexes: ignore_regexes,
+      });
+    } catch (err) {
+      if (err instanceof EmptySelectorMatchError) {
+        extracted = { text: '', html: undefined };
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  const textLen = extracted.text.length;
+  if (textLen === 0 || textLen < min_text_length) {
+    const msg = `Empty snapshot (text length ${textLen}, min_text_length ${min_text_length})`;
+    if (on_empty_snapshot === 'ignore') {
+      throw new EmptySnapshotError(msg, textLen, min_text_length, true);
+    }
+    if (on_empty_snapshot === 'error') {
+      throw new EmptySnapshotError(msg, textLen, min_text_length, false);
+    }
+    // treat_as_change: continue
+  }
+
+  return {
+    url: target_url,
+    selector,
+    fetchedAt,
+    statusCode: result.status,
+    mode,
+    finalUrl: result.finalUrl,
+    redirectCount: result.redirectCount,
+    bytesRead: result.bytesRead,
+    fetchDurationMs,
+    fetchAttempts: attempts,
+    notModified: false,
+    contentType,
+    etag: result.headers.etag ?? undefined,
+    lastModified: result.headers['last-modified'] ?? undefined,
     text: extracted.text,
     html: extracted.html,
     contentHash: sha256Hex(extracted.text),

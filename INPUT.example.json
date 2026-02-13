@@ -3,6 +3,8 @@
   "selector": "h1",
   "targets": [],
   "rendering_mode": "static",
+  "wait_until": "domcontentloaded",
+  "wait_for_selector_timeout_secs": 10,
   "fetch_headers": {},
   "proxy_configuration": {
     "use_apify_proxy": false

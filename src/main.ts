@@ -226,17 +226,20 @@ async function processTarget(
 ): Promise<TargetRunResult> {
   const { kv, history, dead } = deps;
 
-  const stateKeyV2 = makeStateKeyV2({
-    targetUrl: input.target_url,
-    selector: input.selector,
-    renderingMode: input.rendering_mode,
-    fetchHeaders: input.fetch_headers,
-    fields: input.fields,
-    ignoreJsonPaths: input.ignore_json_paths,
-    ignoreSelectors: input.ignore_selectors,
-    ignoreAttributes: input.ignore_attributes,
-    ignoreRegexes: input.ignore_regexes,
-  });
+	  const stateKeyV2 = makeStateKeyV2({
+	    targetUrl: input.target_url,
+	    selector: input.selector,
+	    renderingMode: input.rendering_mode,
+	    waitUntil: input.wait_until,
+	    waitForSelector: input.wait_for_selector,
+	    waitForSelectorTimeoutSecs: input.wait_for_selector_timeout_secs,
+	    fetchHeaders: input.fetch_headers,
+	    fields: input.fields,
+	    ignoreJsonPaths: input.ignore_json_paths,
+	    ignoreSelectors: input.ignore_selectors,
+	    ignoreAttributes: input.ignore_attributes,
+	    ignoreRegexes: input.ignore_regexes,
+	  });
   const stateKeyV1 = makeStateKeyV1(input.target_url, input.selector);
   const stateKey = stateKeyV2;
 

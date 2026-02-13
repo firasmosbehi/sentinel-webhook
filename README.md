@@ -14,6 +14,8 @@ simple "URL in, webhook out" change-detection bridge.
 - `target_url`: URL to monitor.
 - `selector` (optional): CSS selector to scope what is monitored (e.g. `.price`).
 - `targets` (optional): Multi-target mode. Provide an array of `{ target_url, selector?, fields?, ignore_json_paths? }`.
+- `rendering_mode` (optional): `static` (default) or `playwright` for JS-rendered pages.
+- `wait_until` / `wait_for_selector` (optional): Playwright wait strategy controls.
 - `fields` (optional): Structured extraction (CSS selectors + optional attributes) to produce a clean field-level diff.
 - `ignore_json_paths` (optional): JSON Pointer paths to ignore when monitoring `application/json` endpoints (e.g. `/meta/timestamp`).
 - `politeness_delay_ms` (optional): Add a minimum delay between requests to the same hostname during a run (helps avoid rate limits).

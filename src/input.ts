@@ -6,6 +6,7 @@ import type {
   OnEmptySnapshotBehavior,
   RenderingMode,
   SentinelInput,
+  WaitUntil,
 } from './types.js';
 import { normalizeHttpUrl } from './url_normalize.js';
 import { expandIgnoreRegexPresets } from './regex_presets.js';
@@ -29,6 +30,12 @@ const historyModeSchema: z.ZodType<HistoryMode> = z.union([
 ]);
 
 const renderingModeSchema: z.ZodType<RenderingMode> = z.union([z.literal('static'), z.literal('playwright')]);
+
+const waitUntilSchema: z.ZodType<WaitUntil> = z.union([
+  z.literal('domcontentloaded'),
+  z.literal('load'),
+  z.literal('networkidle'),
+]);
 
 const onEmptySnapshotSchema: z.ZodType<OnEmptySnapshotBehavior> = z.union([
   z.literal('error'),
@@ -74,6 +81,9 @@ const rawInputSchema = z
     selector: z.string().trim().min(1).optional(),
     targets: z.array(targetSpecSchema).min(1).optional(),
     rendering_mode: renderingModeSchema.optional(),
+    wait_until: waitUntilSchema.optional(),
+    wait_for_selector: z.string().trim().min(1).optional(),
+    wait_for_selector_timeout_secs: z.coerce.number().int().min(1).optional(),
     fetch_headers: z.record(z.string(), z.string()).optional(),
     proxy_configuration: z
       .object({
@@ -189,6 +199,9 @@ export function parseInput(raw: unknown): SentinelInput {
     selector: parsed.selector,
     targets,
     rendering_mode: parsed.rendering_mode ?? 'static',
+    wait_until: parsed.wait_until ?? 'domcontentloaded',
+    wait_for_selector: parsed.wait_for_selector,
+    wait_for_selector_timeout_secs: parsed.wait_for_selector_timeout_secs ?? 10,
     fetch_headers: parsed.fetch_headers ?? {},
     proxy_configuration: proxy_configuration
       ? {

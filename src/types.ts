@@ -4,6 +4,8 @@ export type HistoryMode = 'none' | 'changes_only' | 'all_events';
 
 export type RenderingMode = 'static' | 'playwright';
 
+export type WaitUntil = 'domcontentloaded' | 'load' | 'networkidle';
+
 export type OnEmptySnapshotBehavior = 'error' | 'treat_as_change' | 'ignore';
 
 export type IgnoreRegexPreset = 'timestamps' | 'uuids' | 'tokens';
@@ -40,6 +42,9 @@ export type SentinelInput = {
   selector?: string;
   targets: TargetInput[];
   rendering_mode: RenderingMode;
+  wait_until: WaitUntil;
+  wait_for_selector?: string;
+  wait_for_selector_timeout_secs: number;
   fetch_headers: Record<string, string>;
   proxy_configuration?: ProxyConfigurationInput;
   target_domain_allowlist: string[];

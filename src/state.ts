@@ -5,6 +5,9 @@ export type StateKeyV2Input = {
   targetUrl: string;
   selector?: string;
   renderingMode: string;
+  waitUntil: string;
+  waitForSelector?: string;
+  waitForSelectorTimeoutSecs: number;
   fetchHeaders: Record<string, string>;
   fields: FieldSpec[];
   ignoreJsonPaths: string[];
@@ -39,6 +42,9 @@ export function makeStateKeyV2(input: StateKeyV2Input): string {
     targetUrl: input.targetUrl,
     selector: input.selector ?? null,
     renderingMode: input.renderingMode,
+    waitUntil: input.waitUntil,
+    waitForSelector: input.waitForSelector ?? null,
+    waitForSelectorTimeoutSecs: input.waitForSelectorTimeoutSecs,
     fetchHeaders: headers,
     fields,
     ignoreJsonPaths,
