@@ -15,6 +15,53 @@
       "description": "Optional CSS selector to watch only a specific part of the page (e.g. .price, #stock-count).",
       "editor": "textfield"
     },
+    "targets": {
+      "title": "Targets (optional)",
+      "type": "array",
+      "description": "Optional multi-target mode. Provide an array of targets to monitor. Each target can override selector/fields/ignore_json_paths. If provided, target_url is optional.",
+      "editor": "json",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target_url": { "type": "string" },
+          "selector": { "type": "string" },
+          "fields": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "selector": { "type": "string" },
+                    "type": { "type": "string", "const": "text" }
+                  },
+                  "required": ["name", "selector", "type"]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "selector": { "type": "string" },
+                    "type": { "type": "string", "const": "attribute" },
+                    "attribute": { "type": "string" }
+                  },
+                  "required": ["name", "selector", "type", "attribute"]
+                }
+              ]
+            }
+          },
+          "ignore_json_paths": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["target_url"]
+      }
+    },
     "rendering_mode": {
       "title": "Rendering mode",
       "type": "string",
@@ -237,6 +284,13 @@
       "default": 0,
       "minimum": 0
     },
+    "max_concurrency": {
+      "title": "Max concurrency",
+      "type": "integer",
+      "description": "Maximum number of targets to process concurrently when using targets[].",
+      "default": 1,
+      "minimum": 1
+    },
     "max_payload_bytes": {
       "title": "Max payload bytes",
       "type": "integer",
@@ -352,5 +406,5 @@
       "default": false
     }
   },
-  "required": ["target_url", "webhook_url"]
+  "required": ["webhook_url"]
 }

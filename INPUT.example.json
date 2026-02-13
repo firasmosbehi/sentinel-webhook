@@ -1,6 +1,7 @@
 {
   "target_url": "https://example.com",
   "selector": "h1",
+  "targets": [],
   "rendering_mode": "static",
   "fetch_headers": {},
   "proxy_configuration": {
@@ -34,6 +35,7 @@
   "max_content_bytes": 2000000,
   "politeness_delay_ms": 0,
   "politeness_jitter_ms": 0,
+  "max_concurrency": 1,
   "max_payload_bytes": 250000,
   "reset_baseline": false,
   "min_text_length": 0,

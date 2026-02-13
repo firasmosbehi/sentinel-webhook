@@ -28,9 +28,17 @@ export type ProxyConfigurationInput = {
   proxy_urls?: string[];
 };
 
+export type TargetInput = {
+  target_url: string;
+  selector?: string;
+  fields?: FieldSpec[];
+  ignore_json_paths?: string[];
+};
+
 export type SentinelInput = {
   target_url: string;
   selector?: string;
+  targets: TargetInput[];
   rendering_mode: RenderingMode;
   fetch_headers: Record<string, string>;
   proxy_configuration?: ProxyConfigurationInput;
@@ -69,6 +77,7 @@ export type SentinelInput = {
   max_content_bytes: number;
   politeness_delay_ms: number;
   politeness_jitter_ms: number;
+  max_concurrency: number;
   max_payload_bytes: number;
   reset_baseline: boolean;
   min_text_length: number;

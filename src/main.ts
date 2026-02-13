@@ -1,4 +1,5 @@
 import { Actor, log } from 'apify';
+import type { Dataset, KeyValueStore } from 'apify';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { parseInput } from './input.js';
@@ -12,7 +13,7 @@ import { redactText, redactUrl, truncate } from './redact.js';
 import { computeEventId } from './event_id.js';
 import { limitPayloadBytes } from './payload_limit.js';
 import { assertUrlAllowedByDomainPolicy } from './domain_policy.js';
-import type { ChangePayload, Snapshot } from './types.js';
+import type { ChangePayload, SentinelInput, Snapshot, TargetInput } from './types.js';
 
 function toError(err: unknown): Error {
   if (err instanceof Error) return err;
@@ -38,6 +39,57 @@ async function loadFallbackInput(): Promise<unknown | null> {
 
 function safeUrl(rawUrl: string, redact: boolean): string {
   return redact ? redactUrl(rawUrl) : rawUrl;
+}
+
+type TargetRunResult = {
+  target_url: string;
+  stateKey: string;
+  outcome:
+    | 'BASELINE_STORED'
+    | 'NO_CHANGE'
+    | 'CHANGE_DETECTED'
+    | 'CHANGE_SUPPRESSED'
+    | 'FETCH_FAILED'
+    | 'EMPTY_SNAPSHOT_IGNORED'
+    | 'EMPTY_SNAPSHOT_ERROR'
+    | 'WEBHOOK_FAILED'
+    | 'BASELINE_RESET'
+    | 'TARGET_FAILED';
+};
+
+function materializeTargetInput(base: SentinelInput, target: TargetInput): SentinelInput {
+  return {
+    ...base,
+    target_url: target.target_url,
+    selector: target.selector ?? base.selector,
+    fields: target.fields ?? base.fields,
+    ignore_json_paths: target.ignore_json_paths ?? base.ignore_json_paths,
+    // Avoid recursive processing.
+    targets: [],
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.floor(concurrency));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (true) {
+      const i = nextIndex;
+      nextIndex += 1;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!, i);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
 }
 
 function extractFirstNumber(text: string): number | null {
@@ -168,29 +220,12 @@ function buildDeadLetterPayloadPreview(payload: ChangePayload, redact: boolean):
   };
 }
 
-await Actor.main(async () => {
-  const raw = (await Actor.getInput()) ?? (await loadFallbackInput());
-  if (raw == null) {
-    throw new Error(
-      'Missing input. Provide Apify Actor input or create INPUT.json in the project root or set SENTINEL_INPUT.',
-    );
-  }
-  const input = parseInput(raw);
-  log.setLevel(input.debug ? log.LEVELS.DEBUG : log.LEVELS.INFO);
+async function processTarget(
+  input: SentinelInput,
+  deps: { kv: KeyValueStore; history: Dataset | null; dead: Dataset },
+): Promise<TargetRunResult> {
+  const { kv, history, dead } = deps;
 
-  // Fail fast on unsafe URLs (SSRF protection).
-  await assertSafeHttpUrl(input.target_url, 'target_url');
-  await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
-  assertUrlAllowedByDomainPolicy(input.target_url, 'target_url', {
-    allowlist: input.target_domain_allowlist,
-    denylist: input.target_domain_denylist,
-  });
-  assertUrlAllowedByDomainPolicy(input.webhook_url, 'webhook_url', {
-    allowlist: input.webhook_domain_allowlist,
-    denylist: input.webhook_domain_denylist,
-  });
-
-  const kv = await Actor.openKeyValueStore(input.state_store_name);
   const stateKeyV2 = makeStateKeyV2({
     targetUrl: input.target_url,
     selector: input.selector,
@@ -205,196 +240,218 @@ await Actor.main(async () => {
   const stateKeyV1 = makeStateKeyV1(input.target_url, input.selector);
   const stateKey = stateKeyV2;
 
-  const storedPreviousV2 = (await kv.getValue<Snapshot>(stateKeyV2)) ?? null;
-  const storedPreviousV1 = storedPreviousV2 ? null : ((await kv.getValue<Snapshot>(stateKeyV1)) ?? null);
-  const storedPrevious = storedPreviousV2 ?? storedPreviousV1;
-  const migratedFromV1 = !!storedPreviousV1;
-  const previous = input.reset_baseline ? null : storedPrevious;
-
-  const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
-
   async function pushHistory(item: Record<string, unknown>): Promise<void> {
     if (!history) return;
     if (input.history_mode === 'changes_only' && item.event !== 'CHANGE_DETECTED') return;
     await history.pushData(item);
   }
 
-  if (input.reset_baseline && storedPrevious) {
-    log.info('Reset baseline requested; ignoring existing baseline.', { stateKey, contentHash: storedPrevious.contentHash });
-    await Actor.pushData({
-      event: 'BASELINE_RESET',
-      url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      timestamp: new Date().toISOString(),
-      stateKey,
-      previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
-    });
-
-    await pushHistory({
-      event: 'BASELINE_RESET',
-      timestamp: new Date().toISOString(),
-      stateKey,
-      url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
-    });
-  }
-
-  if (migratedFromV1) {
-    log.info('Loaded baseline from legacy state key; will migrate to v2 on successful write.', { stateKeyV1, stateKeyV2 });
-    await Actor.pushData({
-      event: 'BASELINE_MIGRATED',
-      timestamp: new Date().toISOString(),
-      stateKeyV1,
-      stateKeyV2,
-      url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      previous: storedPrevious ? { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt } : null,
-    });
-  }
-
-  let current: Snapshot;
   try {
-    current = await buildSnapshot(input, previous);
-  } catch (err) {
-    const e = toError(err);
-    const timestamp = new Date().toISOString();
-    const isEmpty = err instanceof EmptySnapshotError;
+    // Fail fast on unsafe target URL (SSRF protection).
+    await assertSafeHttpUrl(input.target_url, 'target_url');
+    assertUrlAllowedByDomainPolicy(input.target_url, 'target_url', {
+      allowlist: input.target_domain_allowlist,
+      denylist: input.target_domain_denylist,
+    });
 
-    if (isEmpty && err.ignored) {
-      log.info('Empty snapshot ignored. Keeping previous baseline intact.', {
-        stateKey,
-        textLength: err.textLength,
-        minTextLength: err.minTextLength,
-      });
+    const storedPreviousV2 = (await kv.getValue<Snapshot>(stateKeyV2)) ?? null;
+    const storedPreviousV1 = storedPreviousV2 ? null : ((await kv.getValue<Snapshot>(stateKeyV1)) ?? null);
+    const storedPrevious = storedPreviousV2 ?? storedPreviousV1;
+    const migratedFromV1 = !!storedPreviousV1;
+    const previous = input.reset_baseline ? null : storedPrevious;
+
+    if (input.reset_baseline && storedPrevious) {
+      log.info('Reset baseline requested; ignoring existing baseline.', { stateKey, contentHash: storedPrevious.contentHash });
       await Actor.pushData({
-        event: 'EMPTY_SNAPSHOT_IGNORED',
+        event: 'BASELINE_RESET',
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        timestamp: new Date().toISOString(),
+        stateKey,
+        previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
+      });
+
+      await pushHistory({
+        event: 'BASELINE_RESET',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        previous: { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt },
+      });
+    }
+
+    if (migratedFromV1) {
+      log.info('Loaded baseline from legacy state key; will migrate to v2 on successful write.', { stateKeyV1, stateKeyV2 });
+      await Actor.pushData({
+        event: 'BASELINE_MIGRATED',
+        timestamp: new Date().toISOString(),
+        stateKeyV1,
+        stateKeyV2,
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        previous: storedPrevious ? { contentHash: storedPrevious.contentHash, fetchedAt: storedPrevious.fetchedAt } : null,
+      });
+    }
+
+    let current: Snapshot;
+    try {
+      current = await buildSnapshot(input, previous);
+    } catch (err) {
+      const e = toError(err);
+      const timestamp = new Date().toISOString();
+      const isEmpty = err instanceof EmptySnapshotError;
+
+      if (isEmpty && err.ignored) {
+        log.info('Empty snapshot ignored. Keeping previous baseline intact.', {
+          stateKey,
+          textLength: err.textLength,
+          minTextLength: err.minTextLength,
+        });
+        await Actor.pushData({
+          event: 'EMPTY_SNAPSHOT_IGNORED',
+          url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          timestamp,
+          stateKey,
+          textLength: err.textLength,
+          minTextLength: err.minTextLength,
+        });
+
+        if (input.history_mode === 'all_events') {
+          await pushHistory({
+            event: 'EMPTY_SNAPSHOT_IGNORED',
+            timestamp,
+            stateKey,
+            url: safeUrl(input.target_url, input.redact_logs),
+            selector: input.selector,
+            textLength: err.textLength,
+            minTextLength: err.minTextLength,
+          });
+        }
+        return { target_url: input.target_url, stateKey, outcome: 'EMPTY_SNAPSHOT_IGNORED' };
+      }
+
+      log.exception(e, 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
+      await Actor.pushData({
+        event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
         url: safeUrl(input.target_url, input.redact_logs),
         selector: input.selector,
         timestamp,
         stateKey,
-        textLength: err.textLength,
-        minTextLength: err.minTextLength,
+        error: isEmpty ? { name: e.name, message: input.redact_logs ? redactText(e.message) : e.message } : undefined,
+        textLength: isEmpty ? err.textLength : undefined,
+        minTextLength: isEmpty ? err.minTextLength : undefined,
       });
 
       if (input.history_mode === 'all_events') {
         await pushHistory({
-          event: 'EMPTY_SNAPSHOT_IGNORED',
+          event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
           timestamp,
           stateKey,
           url: safeUrl(input.target_url, input.redact_logs),
           selector: input.selector,
-          textLength: err.textLength,
-          minTextLength: err.minTextLength,
         });
       }
-      return;
+      return { target_url: input.target_url, stateKey, outcome: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED' };
     }
 
-    log.exception(e, 'Failed to fetch/extract snapshot. Keeping previous baseline intact.');
-    await Actor.pushData({
-      event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
-      url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      timestamp,
-      stateKey,
-      error: isEmpty ? { name: e.name, message: input.redact_logs ? redactText(e.message) : e.message } : undefined,
-      textLength: isEmpty ? err.textLength : undefined,
-      minTextLength: isEmpty ? err.minTextLength : undefined,
-    });
+    if (!previous) {
+      await kv.setValue(stateKey, current);
+      log.info('Baseline stored (no previous snapshot).', { stateKey, contentHash: current.contentHash });
 
-    if (input.history_mode === 'all_events') {
-      await pushHistory({
-        event: isEmpty ? 'EMPTY_SNAPSHOT_ERROR' : 'FETCH_FAILED',
-        timestamp,
-        stateKey,
-        url: safeUrl(input.target_url, input.redact_logs),
-        selector: input.selector,
-      });
-    }
-    return;
-  }
-
-  if (!previous) {
-    await kv.setValue(stateKey, current);
-    log.info('Baseline stored (no previous snapshot).', { stateKey, contentHash: current.contentHash });
-
-    const payloadBase: ChangePayload = {
-      schema_version: 1,
-      event_id: computeEventId({
+      const payloadBase: ChangePayload = {
+        schema_version: 1,
+        event_id: computeEventId({
+          event: 'BASELINE_STORED',
+          url: input.target_url,
+          selector: input.selector,
+          currentHash: current.contentHash,
+        }),
         event: 'BASELINE_STORED',
         url: input.target_url,
         selector: input.selector,
-        currentHash: current.contentHash,
-      }),
-      event: 'BASELINE_STORED',
-      url: input.target_url,
-      selector: input.selector,
-      timestamp: new Date().toISOString(),
-      current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-    };
+        timestamp: new Date().toISOString(),
+        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+      };
 
-    const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+      const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
 
-    await Actor.pushData({
-      ...payload,
-      url: safeUrl(payload.url, input.redact_logs),
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
-      stateKey,
-    });
+      await Actor.pushData({
+        ...payload,
+        url: safeUrl(payload.url, input.redact_logs),
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        stateKey,
+      });
 
-    if (input.baseline_mode === 'notify') {
-      try {
-        const delivery = await sendWebhook(input, payload);
-        log.info('Baseline webhook sent.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+      if (input.baseline_mode === 'notify') {
+        try {
+          const delivery = await sendWebhook(input, payload);
+          log.info('Baseline webhook sent.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
 
-        await pushHistory({
-          event: 'BASELINE_STORED',
-          timestamp: payload.timestamp,
-          event_id: payload.event_id,
-          stateKey,
-          url: safeUrl(payload.url, input.redact_logs),
-          selector: payload.selector,
-          payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
-          fetch: snapshotFetchMetrics(current, input.redact_logs),
-          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-          delivered: true,
-          delivery,
-        });
-      } catch (err) {
-        const safeErr = toSafeError(err, input.redact_logs);
-        const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
-        const dead = await Actor.openDataset(input.dead_letter_dataset_name);
-        await dead.pushData({
-          event: 'WEBHOOK_DELIVERY_FAILED',
-          timestamp: new Date().toISOString(),
-          stateKey,
-          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-          target_url: safeUrl(input.target_url, input.redact_logs),
-          selector: input.selector,
-          fetch: snapshotFetchMetrics(current, input.redact_logs),
-          error: safeErr,
-          payload: preview.payload,
-          payload_truncated: preview.truncated,
-        });
+          await pushHistory({
+            event: 'BASELINE_STORED',
+            timestamp: payload.timestamp,
+            event_id: payload.event_id,
+            stateKey,
+            url: safeUrl(payload.url, input.redact_logs),
+            selector: payload.selector,
+            payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            delivered: true,
+            delivery,
+          });
+        } catch (err) {
+          const safeErr = toSafeError(err, input.redact_logs);
+          const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
+          await dead.pushData({
+            event: 'WEBHOOK_DELIVERY_FAILED',
+            timestamp: new Date().toISOString(),
+            stateKey,
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            target_url: safeUrl(input.target_url, input.redact_logs),
+            selector: input.selector,
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+            error: safeErr,
+            payload: preview.payload,
+            payload_truncated: preview.truncated,
+          });
 
-        await Actor.pushData({
-          event: 'WEBHOOK_FAILED',
-          timestamp: new Date().toISOString(),
-          stateKey,
-          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-          target_url: safeUrl(input.target_url, input.redact_logs),
-          selector: input.selector,
-          fetch: snapshotFetchMetrics(current, input.redact_logs),
-          error: safeErr,
-        });
+          await Actor.pushData({
+            event: 'WEBHOOK_FAILED',
+            timestamp: new Date().toISOString(),
+            stateKey,
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            target_url: safeUrl(input.target_url, input.redact_logs),
+            selector: input.selector,
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+            error: safeErr,
+          });
 
-        log.error('Baseline webhook delivery failed (stored in dead-letter dataset).', {
-          webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-          dead_letter_dataset_name: input.dead_letter_dataset_name,
-          error: safeErr,
-        });
+          log.error('Baseline webhook delivery failed (stored in dead-letter dataset).', {
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            dead_letter_dataset_name: input.dead_letter_dataset_name,
+            error: safeErr,
+          });
 
+          await pushHistory({
+            event: 'BASELINE_STORED',
+            timestamp: payload.timestamp,
+            event_id: payload.event_id,
+            stateKey,
+            url: safeUrl(payload.url, input.redact_logs),
+            selector: payload.selector,
+            payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+            webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+            delivered: false,
+            error: safeErr,
+          });
+
+          return { target_url: input.target_url, stateKey, outcome: 'WEBHOOK_FAILED' };
+        }
+      } else if (input.history_mode === 'all_events') {
         await pushHistory({
           event: 'BASELINE_STORED',
           timestamp: payload.timestamp,
@@ -406,12 +463,168 @@ await Actor.main(async () => {
           fetch: snapshotFetchMetrics(current, input.redact_logs),
           webhook_url: safeUrl(input.webhook_url, input.redact_logs),
           delivered: false,
-          error: safeErr,
+          webhook_skipped: true,
         });
       }
-    } else if (input.history_mode === 'all_events') {
+
+      return { target_url: input.target_url, stateKey, outcome: 'BASELINE_STORED' };
+    }
+
+    const change = computeTextChange(previous, current);
+    if (!change) {
+      log.info('No change detected.', { stateKey, contentHash: current.contentHash });
+      await Actor.pushData({
+        event: 'NO_CHANGE',
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        timestamp: new Date().toISOString(),
+        previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        stateKey,
+      });
+
+      if (input.history_mode === 'all_events') {
+        await pushHistory({
+          event: 'NO_CHANGE',
+          timestamp: new Date().toISOString(),
+          stateKey,
+          url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+          current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
+        });
+      }
+
+      // Refresh baseline metadata (timestamps/headers) even if content is unchanged.
+      await kv.setValue(stateKey, current);
+      return { target_url: input.target_url, stateKey, outcome: 'NO_CHANGE' };
+    }
+
+    if (input.min_change_ratio > 0) {
+      const ratio = approxChangeRatio(change.old, change.new);
+      if (ratio < input.min_change_ratio) {
+        log.info('Change suppressed (below min_change_ratio).', { stateKey, ratio, min_change_ratio: input.min_change_ratio });
+        await Actor.pushData({
+          event: 'CHANGE_SUPPRESSED',
+          url: safeUrl(input.target_url, input.redact_logs),
+          selector: input.selector,
+          timestamp: new Date().toISOString(),
+          ratio,
+          min_change_ratio: input.min_change_ratio,
+          previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+          current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+          fetch: snapshotFetchMetrics(current, input.redact_logs),
+          stateKey,
+        });
+
+        if (input.history_mode === 'all_events') {
+          await pushHistory({
+            event: 'CHANGE_SUPPRESSED',
+            timestamp: new Date().toISOString(),
+            stateKey,
+            url: safeUrl(input.target_url, input.redact_logs),
+            selector: input.selector,
+            ratio,
+            min_change_ratio: input.min_change_ratio,
+            previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+            current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+            fetch: snapshotFetchMetrics(current, input.redact_logs),
+          });
+        }
+
+        // Suppress alert but still advance baseline to avoid repeated detections.
+        await kv.setValue(stateKey, current);
+        return { target_url: input.target_url, stateKey, outcome: 'CHANGE_SUPPRESSED' };
+      }
+    }
+
+    const payloadBase: ChangePayload = {
+      schema_version: 1,
+      event_id: computeEventId({
+        event: 'CHANGE_DETECTED',
+        url: input.target_url,
+        selector: input.selector,
+        previousHash: previous.contentHash,
+        currentHash: current.contentHash,
+      }),
+      event: 'CHANGE_DETECTED',
+      url: input.target_url,
+      selector: input.selector,
+      timestamp: new Date().toISOString(),
+      changes: (() => {
+        const out: NonNullable<ChangePayload['changes']> = { text: change };
+
+        if (current.mode === 'fields') {
+          const fieldsChange = computeFieldsChangeFromSnapshotText(previous.text, current.text);
+          if (fieldsChange) out.fields = fieldsChange;
+        } else if (current.mode === 'json') {
+          const jsonChange = computeJsonChangeFromSnapshotText(previous.text, current.text, input.ignore_json_paths);
+          if (jsonChange) out.json = jsonChange;
+        }
+
+        return out;
+      })(),
+      previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
+      current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
+    };
+
+    const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
+
+    let delivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
+    try {
+      delivery = await sendWebhook(input, payload);
+      log.info('Change detected; webhook delivered.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
+
       await pushHistory({
-        event: 'BASELINE_STORED',
+        event: 'CHANGE_DETECTED',
+        timestamp: payload.timestamp,
+        event_id: payload.event_id,
+        stateKey,
+        url: safeUrl(payload.url, input.redact_logs),
+        selector: payload.selector,
+        payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        delivered: true,
+        delivery,
+      });
+    } catch (err) {
+      const safeErr = toSafeError(err, input.redact_logs);
+      const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
+      await dead.pushData({
+        event: 'WEBHOOK_DELIVERY_FAILED',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        target_url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        error: safeErr,
+        payload: preview.payload,
+        payload_truncated: preview.truncated,
+      });
+
+      await Actor.pushData({
+        event: 'WEBHOOK_FAILED',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        target_url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        fetch: snapshotFetchMetrics(current, input.redact_logs),
+        error: safeErr,
+      });
+
+      log.error('Change detected but webhook delivery failed. Baseline NOT updated (will retry next run).', {
+        webhook_url: safeUrl(input.webhook_url, input.redact_logs),
+        dead_letter_dataset_name: input.dead_letter_dataset_name,
+        error: safeErr,
+      });
+
+      await pushHistory({
+        event: 'CHANGE_DETECTED',
         timestamp: payload.timestamp,
         event_id: payload.event_id,
         stateKey,
@@ -421,190 +634,111 @@ await Actor.main(async () => {
         fetch: snapshotFetchMetrics(current, input.redact_logs),
         webhook_url: safeUrl(input.webhook_url, input.redact_logs),
         delivered: false,
-        webhook_skipped: true,
+        error: safeErr,
       });
+
+      return { target_url: input.target_url, stateKey, outcome: 'WEBHOOK_FAILED' };
     }
 
-    return;
-  }
-
-  const change = computeTextChange(previous, current);
-  if (!change) {
-    log.info('No change detected.', { stateKey, contentHash: current.contentHash });
-    await Actor.pushData({
-      event: 'NO_CHANGE',
-      url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      timestamp: new Date().toISOString(),
-      previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-      current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
-      stateKey,
-    });
-
-    if (input.history_mode === 'all_events') {
-      await pushHistory({
-        event: 'NO_CHANGE',
-        timestamp: new Date().toISOString(),
-        stateKey,
-        url: safeUrl(input.target_url, input.redact_logs),
-        selector: input.selector,
-        previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-        fetch: snapshotFetchMetrics(current, input.redact_logs),
-      });
-    }
-
-    // Refresh baseline metadata (timestamps/headers) even if content is unchanged.
     await kv.setValue(stateKey, current);
-    return;
-  }
-
-  if (input.min_change_ratio > 0) {
-    const ratio = approxChangeRatio(change.old, change.new);
-    if (ratio < input.min_change_ratio) {
-      log.info('Change suppressed (below min_change_ratio).', { stateKey, ratio, min_change_ratio: input.min_change_ratio });
-      await Actor.pushData({
-        event: 'CHANGE_SUPPRESSED',
-        url: safeUrl(input.target_url, input.redact_logs),
-        selector: input.selector,
-        timestamp: new Date().toISOString(),
-        ratio,
-        min_change_ratio: input.min_change_ratio,
-        previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-        current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-        fetch: snapshotFetchMetrics(current, input.redact_logs),
-        stateKey,
-      });
-
-      if (input.history_mode === 'all_events') {
-        await pushHistory({
-          event: 'CHANGE_SUPPRESSED',
-          timestamp: new Date().toISOString(),
-          stateKey,
-          url: safeUrl(input.target_url, input.redact_logs),
-          selector: input.selector,
-          ratio,
-          min_change_ratio: input.min_change_ratio,
-          previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-          current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-          fetch: snapshotFetchMetrics(current, input.redact_logs),
-        });
-      }
-
-      // Suppress alert but still advance baseline to avoid repeated detections.
-      await kv.setValue(stateKey, current);
-      return;
-    }
-  }
-
-  const payloadBase: ChangePayload = {
-    schema_version: 1,
-    event_id: computeEventId({
-      event: 'CHANGE_DETECTED',
-      url: input.target_url,
-      selector: input.selector,
-      previousHash: previous.contentHash,
-      currentHash: current.contentHash,
-    }),
-    event: 'CHANGE_DETECTED',
-    url: input.target_url,
-    selector: input.selector,
-    timestamp: new Date().toISOString(),
-    changes: (() => {
-      const out: NonNullable<ChangePayload['changes']> = { text: change };
-
-      if (current.mode === 'fields') {
-        const fieldsChange = computeFieldsChangeFromSnapshotText(previous.text, current.text);
-        if (fieldsChange) out.fields = fieldsChange;
-      } else if (current.mode === 'json') {
-        const jsonChange = computeJsonChangeFromSnapshotText(previous.text, current.text, input.ignore_json_paths);
-        if (jsonChange) out.json = jsonChange;
-      }
-
-      return out;
-    })(),
-    previous: { contentHash: previous.contentHash, fetchedAt: previous.fetchedAt },
-    current: { contentHash: current.contentHash, fetchedAt: current.fetchedAt },
-  };
-
-  const { payload } = limitPayloadBytes(payloadBase, input.max_payload_bytes);
-
-  let delivery: Awaited<ReturnType<typeof sendWebhook>> | null = null;
-  try {
-    delivery = await sendWebhook(input, payload);
-    log.info('Change detected; webhook delivered.', { webhook_url: safeUrl(input.webhook_url, input.redact_logs), ...delivery });
-
-    await pushHistory({
-      event: 'CHANGE_DETECTED',
-      timestamp: payload.timestamp,
-      event_id: payload.event_id,
-      stateKey,
+    await Actor.pushData({
+      ...payload,
       url: safeUrl(payload.url, input.redact_logs),
-      selector: payload.selector,
-      payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
       fetch: snapshotFetchMetrics(current, input.redact_logs),
-      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-      delivered: true,
-      delivery,
+      webhook: delivery,
+      stateKey,
     });
+
+    return { target_url: input.target_url, stateKey, outcome: 'CHANGE_DETECTED' };
   } catch (err) {
     const safeErr = toSafeError(err, input.redact_logs);
-    const preview = buildDeadLetterPayloadPreview(payload, input.redact_logs);
-    const dead = await Actor.openDataset(input.dead_letter_dataset_name);
-    await dead.pushData({
-      event: 'WEBHOOK_DELIVERY_FAILED',
-      timestamp: new Date().toISOString(),
-      stateKey,
-      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-      target_url: safeUrl(input.target_url, input.redact_logs),
-      selector: input.selector,
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
-      error: safeErr,
-      payload: preview.payload,
-      payload_truncated: preview.truncated,
-    });
-
+    log.exception(toError(err), 'Target processing failed.');
     await Actor.pushData({
-      event: 'WEBHOOK_FAILED',
+      event: 'TARGET_FAILED',
       timestamp: new Date().toISOString(),
       stateKey,
-      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-      target_url: safeUrl(input.target_url, input.redact_logs),
+      url: safeUrl(input.target_url, input.redact_logs),
       selector: input.selector,
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
       error: safeErr,
     });
+    if (input.history_mode === 'all_events') {
+      await pushHistory({
+        event: 'TARGET_FAILED',
+        timestamp: new Date().toISOString(),
+        stateKey,
+        url: safeUrl(input.target_url, input.redact_logs),
+        selector: input.selector,
+        error: safeErr,
+      });
+    }
+    return { target_url: input.target_url, stateKey, outcome: 'TARGET_FAILED' };
+  }
+}
 
-    log.error('Change detected but webhook delivery failed. Baseline NOT updated (will retry next run).', {
-      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-      dead_letter_dataset_name: input.dead_letter_dataset_name,
-      error: safeErr,
-    });
+await Actor.main(async () => {
+  const raw = (await Actor.getInput()) ?? (await loadFallbackInput());
+  if (raw == null) {
+    throw new Error(
+      'Missing input. Provide Apify Actor input or create INPUT.json in the project root or set SENTINEL_INPUT.',
+    );
+  }
+  const input = parseInput(raw);
+  log.setLevel(input.debug ? log.LEVELS.DEBUG : log.LEVELS.INFO);
 
-    await pushHistory({
-      event: 'CHANGE_DETECTED',
-      timestamp: payload.timestamp,
-      event_id: payload.event_id,
-      stateKey,
-      url: safeUrl(payload.url, input.redact_logs),
-      selector: payload.selector,
-      payload: { ...payload, url: safeUrl(payload.url, input.redact_logs) },
-      fetch: snapshotFetchMetrics(current, input.redact_logs),
-      webhook_url: safeUrl(input.webhook_url, input.redact_logs),
-      delivered: false,
-      error: safeErr,
-    });
+  // Fail fast on unsafe webhook URL (SSRF protection).
+  await assertSafeHttpUrl(input.webhook_url, 'webhook_url');
+  assertUrlAllowedByDomainPolicy(input.webhook_url, 'webhook_url', {
+    allowlist: input.webhook_domain_allowlist,
+    denylist: input.webhook_domain_denylist,
+  });
 
-    return;
+  if (input.targets.length === 0) {
+    throw new Error('No targets provided. Provide target_url or non-empty targets[].');
   }
 
-  await kv.setValue(stateKey, current);
+  const kv = await Actor.openKeyValueStore(input.state_store_name);
+  const history = input.history_mode === 'none' ? null : await Actor.openDataset(input.history_dataset_name);
+  const dead = await Actor.openDataset(input.dead_letter_dataset_name);
+
+  const targetInputs = input.targets.map((t) => materializeTargetInput(input, t));
+  log.info('Processing targets.', { targets: targetInputs.length, max_concurrency: input.max_concurrency });
+
+  const results = await mapWithConcurrency(targetInputs, input.max_concurrency, async (ti) =>
+    processTarget(ti, { kv, history, dead }),
+  );
+
+  const counts: Record<string, number> = {};
+  for (const r of results) {
+    counts[r.outcome] = (counts[r.outcome] ?? 0) + 1;
+  }
+
+  const timestamp = new Date().toISOString();
   await Actor.pushData({
-    ...payload,
-    url: safeUrl(payload.url, input.redact_logs),
-    fetch: snapshotFetchMetrics(current, input.redact_logs),
-    webhook: delivery,
-    stateKey,
+    event: 'RUN_SUMMARY',
+    timestamp,
+    targets_total: results.length,
+    outcomes: counts,
+    failures: results
+      .filter(
+        (r) =>
+          r.outcome === 'FETCH_FAILED' ||
+          r.outcome === 'EMPTY_SNAPSHOT_ERROR' ||
+          r.outcome === 'WEBHOOK_FAILED' ||
+          r.outcome === 'TARGET_FAILED',
+      )
+      .map((r) => ({
+        target_url: safeUrl(r.target_url, input.redact_logs),
+        stateKey: r.stateKey,
+        outcome: r.outcome,
+      })),
   });
+
+  if (history && input.history_mode === 'all_events') {
+    await history.pushData({
+      event: 'RUN_SUMMARY',
+      timestamp,
+      targets_total: results.length,
+      outcomes: counts,
+    });
+  }
 });

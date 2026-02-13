@@ -59,10 +59,20 @@ const fieldAttributeSchema = z
   })
   .strict();
 
-const rawInputSchema = z
+const targetSpecSchema = z
   .object({
     target_url: httpUrl,
     selector: z.string().trim().min(1).optional(),
+    fields: z.array(z.union([fieldTextSchema, fieldAttributeSchema])).optional(),
+    ignore_json_paths: z.array(z.string().trim().min(1)).optional(),
+  })
+  .strict();
+
+const rawInputSchema = z
+  .object({
+    target_url: httpUrl.optional(),
+    selector: z.string().trim().min(1).optional(),
+    targets: z.array(targetSpecSchema).min(1).optional(),
     rendering_mode: renderingModeSchema.optional(),
     fetch_headers: z.record(z.string(), z.string()).optional(),
     proxy_configuration: z
@@ -107,6 +117,7 @@ const rawInputSchema = z
     max_content_bytes: z.coerce.number().int().min(1).optional(),
     politeness_delay_ms: z.coerce.number().int().min(0).optional(),
     politeness_jitter_ms: z.coerce.number().int().min(0).optional(),
+    max_concurrency: z.coerce.number().int().min(1).optional(),
     max_payload_bytes: z.coerce.number().int().min(1024).optional(),
     reset_baseline: z.coerce.boolean().optional(),
     min_text_length: z.coerce.number().int().min(0).optional(),
@@ -122,7 +133,10 @@ const rawInputSchema = z
     redact_logs: z.coerce.boolean().optional(),
     debug: z.coerce.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine((d) => !!d.target_url || (Array.isArray(d.targets) && d.targets.length > 0), {
+    message: 'Provide target_url or non-empty targets[]',
+  });
 
 export function parseInput(raw: unknown): SentinelInput {
   const parsed = rawInputSchema.parse(raw ?? {});
@@ -138,16 +152,42 @@ export function parseInput(raw: unknown): SentinelInput {
   const fields = parsed.fields ?? [];
   const ignore_json_paths = parsed.ignore_json_paths ?? [];
 
-  const fieldNames = new Set<string>();
-  for (const f of fields) {
-    const key = f.name;
-    if (fieldNames.has(key)) throw new Error(`Duplicate field name in fields[]: ${key}`);
-    fieldNames.add(key);
+  function assertUniqueFieldNames(items: Array<{ name: string }>, label: string): void {
+    const names = new Set<string>();
+    for (const f of items) {
+      const key = f.name;
+      if (names.has(key)) throw new Error(`Duplicate field name in ${label}: ${key}`);
+      names.add(key);
+    }
+  }
+
+  assertUniqueFieldNames(fields, 'fields[]');
+
+  const targets = [];
+  if (parsed.target_url) {
+    targets.push({ target_url: normalizeHttpUrl(parsed.target_url) });
+  }
+  for (const t of parsed.targets ?? []) {
+    const tFields = t.fields ?? [];
+    assertUniqueFieldNames(tFields, `targets[].fields (${t.target_url})`);
+    targets.push({
+      target_url: normalizeHttpUrl(t.target_url),
+      selector: t.selector,
+      fields: t.fields,
+      ignore_json_paths: t.ignore_json_paths,
+    });
+  }
+
+  const primaryTargetUrl = targets[0]?.target_url;
+  if (!primaryTargetUrl) {
+    // Should be prevented by schema refine, but keep a defensive runtime guard.
+    throw new Error('Provide target_url or non-empty targets[]');
   }
 
   return {
-    target_url: normalizeHttpUrl(parsed.target_url),
+    target_url: primaryTargetUrl,
     selector: parsed.selector,
+    targets,
     rendering_mode: parsed.rendering_mode ?? 'static',
     fetch_headers: parsed.fetch_headers ?? {},
     proxy_configuration: proxy_configuration
@@ -191,6 +231,7 @@ export function parseInput(raw: unknown): SentinelInput {
     max_content_bytes: parsed.max_content_bytes ?? 2_000_000,
     politeness_delay_ms: parsed.politeness_delay_ms ?? 0,
     politeness_jitter_ms: parsed.politeness_jitter_ms ?? 0,
+    max_concurrency: parsed.max_concurrency ?? 1,
     max_payload_bytes: parsed.max_payload_bytes ?? 250_000,
     reset_baseline: parsed.reset_baseline ?? false,
     min_text_length: parsed.min_text_length ?? 0,
