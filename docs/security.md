@@ -12,6 +12,10 @@ This protection applies to:
 - `webhook_url`
 - Playwright-rendered page subrequests (when `rendering_mode=playwright`)
 
+Local development:
+- Set `allow_localhost=true` to allow loopback URLs while running locally.
+- On the Apify platform, localhost/loopback remains blocked.
+
 ## Domain Policy
 
 You can restrict allowed destinations with allow/deny lists:
@@ -34,3 +38,5 @@ Defaults are biased toward safer storage/logging:
 - `max_content_bytes`: hard cap on downloaded response size.
 - `max_payload_bytes`: hard cap on webhook payload size (truncates large diffs).
 
+Optional features with extra storage:
+- `store_debug_artifacts=true` stores redacted snapshot artifacts in `artifact_store_name` when `redact_logs=true`.

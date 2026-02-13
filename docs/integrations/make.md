@@ -5,6 +5,8 @@ This guide shows a basic scenario:
 - Make.com receives the webhook.
 - Make.com deduplicates by `event_id`.
 
+Demo asset: `assets/demo.webm`
+
 ## Steps
 
 1. In Make.com, create a new Scenario.
@@ -19,4 +21,3 @@ This guide shows a basic scenario:
 ## Example Blueprint
 
 See `docs/integrations/make.blueprint.example.json` for a placeholder blueprint-style example you can adapt.
-

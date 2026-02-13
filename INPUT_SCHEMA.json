@@ -99,11 +99,86 @@
       "default": 10,
       "minimum": 1
     },
+    "playwright_block_resources": {
+      "title": "Block resources (Playwright)",
+      "type": "boolean",
+      "description": "If enabled, abort loading images/media/fonts in Playwright mode (faster + cheaper).",
+      "default": false
+    },
+    "screenshot_on_change": {
+      "title": "Screenshot on change (Playwright)",
+      "type": "boolean",
+      "description": "If enabled, capture before/after screenshots when a change is detected and include artifact references in the webhook payload (Playwright only).",
+      "default": false
+    },
+    "screenshot_scope": {
+      "title": "Screenshot scope",
+      "type": "string",
+      "description": "Capture full page or a specific selector region (Playwright only).",
+      "editor": "select",
+      "default": "full_page",
+      "enum": ["full_page", "selector"]
+    },
+    "screenshot_selector": {
+      "title": "Screenshot selector (optional)",
+      "type": "string",
+      "description": "Selector used when screenshot_scope=selector. If omitted, uses selector.",
+      "editor": "textfield"
+    },
     "fetch_headers": {
       "title": "Fetch headers (optional)",
       "type": "object",
       "description": "Extra HTTP headers to include when fetching the target URL.",
       "editor": "json"
+    },
+    "target_method": {
+      "title": "Target method",
+      "type": "string",
+      "description": "HTTP method used to fetch the target URL (static mode supports GET/POST/etc; Playwright currently supports GET only).",
+      "editor": "textfield",
+      "default": "GET"
+    },
+    "target_body": {
+      "title": "Target body (optional)",
+      "type": "string",
+      "description": "Optional request body for the target request (static mode only; not allowed for GET/HEAD).",
+      "editor": "textarea"
+    },
+    "target_cookies": {
+      "title": "Target cookies (optional)",
+      "type": "array",
+      "description": "Optional cookies to send when fetching the target. Each item supports: name, value, domain?, path?, expires?, httpOnly?, secure?, sameSite?.",
+      "editor": "json",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" },
+          "domain": { "type": "string" },
+          "path": { "type": "string" },
+          "expires": { "type": "number" },
+          "httpOnly": { "type": "boolean" },
+          "secure": { "type": "boolean" },
+          "sameSite": { "type": "string", "enum": ["Strict", "Lax", "None"] }
+        },
+        "required": ["name", "value"]
+      }
+    },
+    "robots_txt_mode": {
+      "title": "Robots.txt mode",
+      "type": "string",
+      "description": "If respect, Sentinel will try to honor robots.txt disallow rules (best-effort).",
+      "editor": "select",
+      "default": "ignore",
+      "enum": ["ignore", "respect"]
+    },
+    "block_page_regexes": {
+      "title": "Block page regexes (optional)",
+      "type": "array",
+      "description": "If any pattern matches extracted text/HTML, treat as fetch failure (prevents poisoning the baseline on soft-ban pages).",
+      "editor": "stringList",
+      "items": { "type": "string" }
     },
     "proxy_configuration": {
       "title": "Proxy configuration (optional)",
@@ -128,8 +203,37 @@
     "webhook_url": {
       "title": "Webhook URL",
       "type": "string",
-      "description": "Callback URL to POST change events to.",
+      "description": "Primary callback URL to POST events to (backwards compatible). If webhook_urls[] is set, webhook_url is treated as the first entry.",
       "editor": "textfield"
+    },
+    "webhook_urls": {
+      "title": "Webhook URLs (optional)",
+      "type": "array",
+      "description": "Optional list of webhook endpoints to deliver to (fan-out). If set, Sentinel will POST the same payload to each URL.",
+      "editor": "stringList",
+      "items": { "type": "string" }
+    },
+    "webhook_delivery_mode": {
+      "title": "Webhook delivery mode",
+      "type": "string",
+      "description": "When multiple webhook_urls are configured: all = fail if any endpoint fails; any = succeed if at least one endpoint succeeds.",
+      "editor": "select",
+      "default": "all",
+      "enum": ["all", "any"]
+    },
+    "webhook_method": {
+      "title": "Webhook method",
+      "type": "string",
+      "description": "HTTP method used to deliver the webhook payload.",
+      "editor": "textfield",
+      "default": "POST"
+    },
+    "webhook_content_type": {
+      "title": "Webhook content-type",
+      "type": "string",
+      "description": "Content-Type header for webhook requests (unless overridden in webhook_headers).",
+      "editor": "textfield",
+      "default": "application/json; charset=utf-8"
     },
     "webhook_domain_allowlist": {
       "title": "Webhook domain allowlist (optional)",
@@ -173,6 +277,19 @@
       "editor": "textfield",
       "default": "sentinel-state"
     },
+    "compress_snapshots": {
+      "title": "Compress snapshots",
+      "type": "boolean",
+      "description": "If enabled, store baseline snapshots gzipped+base64 in the state KV to reduce size.",
+      "default": false
+    },
+    "snapshot_history_limit": {
+      "title": "Snapshot history limit",
+      "type": "integer",
+      "description": "Keep last N snapshot metadata entries per target in the state KV (0 disables).",
+      "default": 0,
+      "minimum": 0
+    },
     "dead_letter_dataset_name": {
       "title": "Dead-letter dataset name",
       "type": "string",
@@ -213,6 +330,19 @@
       "editor": "select",
       "default": "changes_only",
       "enum": ["none", "changes_only", "all_events"]
+    },
+    "artifact_store_name": {
+      "title": "Artifact store name",
+      "type": "string",
+      "description": "Key-Value Store name used for storing artifacts (screenshots, debug snapshots).",
+      "editor": "textfield",
+      "default": "sentinel-artifacts"
+    },
+    "store_debug_artifacts": {
+      "title": "Store debug artifacts",
+      "type": "boolean",
+      "description": "If enabled, store previous/current snapshot JSON artifacts and include references in the webhook payload (redacted when redact_logs=true).",
+      "default": false
     },
     "timeout_secs": {
       "title": "Timeout (seconds)",
@@ -304,6 +434,45 @@
       "description": "Optional maximum total time (including backoff delays) spent retrying webhook delivery. Leave empty for no limit.",
       "editor": "textfield"
     },
+    "notify_on_no_change": {
+      "title": "Notify on no change",
+      "type": "boolean",
+      "description": "If enabled, send a NO_CHANGE webhook even when there is no change (heartbeat).",
+      "default": false
+    },
+    "notify_on_fetch_failure": {
+      "title": "Notify on fetch failure",
+      "type": "boolean",
+      "description": "If enabled, send a FETCH_FAILED webhook on fetch errors (debounced).",
+      "default": false
+    },
+    "fetch_failure_debounce_secs": {
+      "title": "Fetch failure debounce (seconds)",
+      "type": "integer",
+      "description": "Debounce window for repeated fetch-failure notifications for the same target.",
+      "default": 3600,
+      "minimum": 0
+    },
+    "webhook_circuit_breaker_enabled": {
+      "title": "Webhook circuit breaker",
+      "type": "boolean",
+      "description": "If enabled, pause webhook deliveries after repeated failures for a cooldown window.",
+      "default": false
+    },
+    "webhook_circuit_failure_threshold": {
+      "title": "Circuit breaker failure threshold",
+      "type": "integer",
+      "description": "Consecutive failures required to open the circuit.",
+      "default": 5,
+      "minimum": 1
+    },
+    "webhook_circuit_cooldown_secs": {
+      "title": "Circuit breaker cooldown (seconds)",
+      "type": "integer",
+      "description": "How long to keep the circuit open after tripping.",
+      "default": 3600,
+      "minimum": 0
+    },
     "max_redirects": {
       "title": "Max redirects",
       "type": "integer",
@@ -329,6 +498,13 @@
       "title": "Politeness jitter (ms)",
       "type": "integer",
       "description": "Optional random jitter added to politeness_delay_ms (0..politeness_jitter_ms).",
+      "default": 0,
+      "minimum": 0
+    },
+    "schedule_jitter_ms": {
+      "title": "Schedule jitter (ms)",
+      "type": "integer",
+      "description": "Sleep a random 0..N ms at the start of the run to avoid thundering herd effects.",
       "default": 0,
       "minimum": 0
     },
@@ -374,6 +550,50 @@
       "default": 0,
       "minimum": 0,
       "maximum": 1
+    },
+    "include_unified_diff": {
+      "title": "Include unified diff patch",
+      "type": "boolean",
+      "description": "If enabled, include changes.text.patch (unified diff) in change payloads.",
+      "default": false
+    },
+    "unified_diff_context_lines": {
+      "title": "Unified diff context lines",
+      "type": "integer",
+      "description": "Context lines in the unified diff.",
+      "default": 3,
+      "minimum": 0
+    },
+    "unified_diff_max_chars": {
+      "title": "Unified diff max chars",
+      "type": "integer",
+      "description": "Maximum patch length; longer diffs are truncated.",
+      "default": 20000,
+      "minimum": 0
+    },
+    "selector_aggregation_mode": {
+      "title": "Selector aggregation mode",
+      "type": "string",
+      "description": "When selector matches multiple nodes: first = snapshot only first match; all = snapshot concatenation.",
+      "editor": "select",
+      "default": "all",
+      "enum": ["first", "all"]
+    },
+    "whitespace_mode": {
+      "title": "Whitespace mode",
+      "type": "string",
+      "description": "Whitespace normalization strategy.",
+      "editor": "select",
+      "default": "collapse",
+      "enum": ["collapse", "preserve_lines"]
+    },
+    "unicode_normalization": {
+      "title": "Unicode normalization",
+      "type": "string",
+      "description": "Optional Unicode normalization (NFKC) for more stable comparisons.",
+      "editor": "select",
+      "default": "none",
+      "enum": ["none", "NFKC"]
     },
     "fields": {
       "title": "Fields (optional)",
@@ -441,6 +661,18 @@
       "editor": "stringList",
       "items": { "type": "string" }
     },
+    "allow_localhost": {
+      "title": "Allow localhost (local dev only)",
+      "type": "boolean",
+      "description": "Allow target_url/webhook_url to be localhost/loopback only in local development (blocked on Apify platform).",
+      "default": false
+    },
+    "structured_logs": {
+      "title": "Structured JSON logs",
+      "type": "boolean",
+      "description": "Emit one-line JSON log events to stdout.",
+      "default": false
+    },
     "redact_logs": {
       "title": "Redact logs",
       "type": "boolean",
@@ -457,28 +689,48 @@
   "sections": [
     {
       "title": "Basic",
-      "properties": ["mode", "target_url", "targets", "selector", "webhook_url", "baseline_mode"]
+      "properties": ["mode", "target_url", "targets", "selector", "webhook_url", "webhook_urls", "baseline_mode"]
     },
     {
       "title": "Rendering",
-      "properties": ["rendering_mode", "wait_until", "wait_for_selector", "wait_for_selector_timeout_secs"]
+      "properties": [
+        "rendering_mode",
+        "wait_until",
+        "wait_for_selector",
+        "wait_for_selector_timeout_secs",
+        "playwright_block_resources",
+        "screenshot_on_change",
+        "screenshot_scope",
+        "screenshot_selector"
+      ]
     },
     {
       "title": "Diffing",
       "properties": [
+        "selector_aggregation_mode",
+        "whitespace_mode",
+        "unicode_normalization",
         "fields",
         "ignore_json_paths",
         "ignore_selectors",
         "ignore_attributes",
         "ignore_regex_presets",
         "ignore_regexes",
-        "min_change_ratio"
+        "min_change_ratio",
+        "include_unified_diff",
+        "unified_diff_context_lines",
+        "unified_diff_max_chars"
       ]
     },
     {
       "title": "Fetching",
       "properties": [
         "fetch_headers",
+        "target_method",
+        "target_body",
+        "target_cookies",
+        "robots_txt_mode",
+        "block_page_regexes",
         "proxy_configuration",
         "fetch_timeout_secs",
         "fetch_connect_timeout_secs",
@@ -487,12 +739,16 @@
         "max_redirects",
         "max_content_bytes",
         "politeness_delay_ms",
-        "politeness_jitter_ms"
+        "politeness_jitter_ms",
+        "schedule_jitter_ms"
       ]
     },
     {
       "title": "Webhook",
       "properties": [
+        "webhook_delivery_mode",
+        "webhook_method",
+        "webhook_content_type",
         "webhook_headers",
         "webhook_secret",
         "webhook_timeout_secs",
@@ -501,12 +757,28 @@
         "webhook_retry_on_statuses",
         "webhook_retry_on_5xx",
         "webhook_max_retry_time_secs",
+        "notify_on_no_change",
+        "notify_on_fetch_failure",
+        "fetch_failure_debounce_secs",
+        "webhook_circuit_breaker_enabled",
+        "webhook_circuit_failure_threshold",
+        "webhook_circuit_cooldown_secs",
         "max_payload_bytes"
       ]
     },
     {
       "title": "Storage",
-      "properties": ["state_store_name", "dead_letter_dataset_name", "history_dataset_name", "history_mode", "reset_baseline"]
+      "properties": [
+        "state_store_name",
+        "compress_snapshots",
+        "snapshot_history_limit",
+        "artifact_store_name",
+        "store_debug_artifacts",
+        "dead_letter_dataset_name",
+        "history_dataset_name",
+        "history_mode",
+        "reset_baseline"
+      ]
     },
     {
       "title": "Dead-Letter Replay",
@@ -519,12 +791,22 @@
         "target_domain_denylist",
         "webhook_domain_allowlist",
         "webhook_domain_denylist",
+        "allow_localhost",
         "redact_logs"
       ]
     },
     {
       "title": "Advanced",
-      "properties": ["max_concurrency", "min_text_length", "on_empty_snapshot", "timeout_secs", "max_retries", "retry_backoff_ms", "debug"]
+      "properties": [
+        "max_concurrency",
+        "min_text_length",
+        "on_empty_snapshot",
+        "structured_logs",
+        "timeout_secs",
+        "max_retries",
+        "retry_backoff_ms",
+        "debug"
+      ]
     }
   ],
   "required": ["webhook_url"]

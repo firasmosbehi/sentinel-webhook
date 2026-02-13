@@ -7,6 +7,11 @@
 Turn any static web URL into a developer-friendly webhook that fires only when
 meaningful changes are detected.
 
+## Demo
+
+- Video: `assets/demo.webm`
+- Store screenshots: `assets/store/screenshot-1.png`, `assets/store/screenshot-2.png`
+
 ## What It Is
 
 Most websites don't push events. Developers end up writing polling jobs, storing
@@ -28,6 +33,8 @@ simple "URL in, webhook out" change-detection bridge.
 - `replay_limit` / `replay_use_stored_webhook_url` / `replay_dry_run`: Replay controls when `mode=replay_dead_letter`.
 - `webhook_url`: Callback URL to POST change events to.
 
+Full input reference: `docs/input-reference.md`
+
 ## Webhook Payload
 
 ```json
@@ -37,17 +44,26 @@ simple "URL in, webhook out" change-detection bridge.
   "event": "CHANGE_DETECTED",
   "url": "https://example.com/product/xyz",
   "timestamp": "2026-05-12T10:00:00Z",
+  "summary": "Text changed: $49.99 -> $45.00 (delta -4.99)",
   "changes": {
     "text": {
       "old": "Old text…",
       "new": "New text…",
-      "delta": -4.99
+      "delta": -4.99,
+      "patch": "@@ -1 +1 @@\n-Old text…\n+New text…\n"
     },
     "fields": {
       "price": { "old": "49.99", "new": "45.00", "delta": -4.99 }
     },
     "json": {
       "diffs": [{ "path": "/meta/version", "op": "replace", "old": 1, "new": 2 }]
+    }
+  },
+  "artifacts": {
+    "screenshots": {
+      "scope": "full_page",
+      "before": { "store_name": "sentinel-artifacts", "key": "artifact-…-before.png", "content_type": "image/png", "bytes": 12345 },
+      "after": { "store_name": "sentinel-artifacts", "key": "artifact-…-after.png", "content_type": "image/png", "bytes": 12580 }
     }
   },
   "previous": { "contentHash": "…", "fetchedAt": "2026-05-12T09:45:00Z" },

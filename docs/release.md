@@ -17,6 +17,6 @@
 2. Ensure `npm test`, `npm run lint`, `npm run build` pass.
 3. Verify `INPUT_SCHEMA.json` matches runtime validation defaults.
 4. Update docs (quickstart, payload reference, input reference).
-5. Tag a release in Git and publish notes (GitHub Releases).
-6. Deploy updated Actor to Apify and validate one end-to-end scheduled run.
-
+5. (Optional) Generate/update launch assets: `npm run generate:assets`.
+6. Tag a release in Git and publish notes (GitHub Releases).
+7. Deploy updated Actor to Apify and validate one end-to-end scheduled run.

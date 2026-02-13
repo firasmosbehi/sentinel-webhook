@@ -36,3 +36,11 @@ Sentinel will:
 - Job listings monitoring
 - Inventory/stock status tracking
 
+## Store Assets
+
+Generated files (run `npm run generate:assets`):
+- Actor icon: `assets/icon.png`
+- Store screenshots:
+  - `assets/store/screenshot-1.png`
+  - `assets/store/screenshot-2.png`
+- Demo video: `assets/demo.webm`

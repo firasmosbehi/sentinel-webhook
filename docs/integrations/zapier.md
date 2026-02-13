@@ -5,6 +5,8 @@ This guide shows a simple flow:
 - Zapier receives the webhook.
 - Zapier deduplicates by `event_id`.
 
+Demo asset: `assets/demo.webm`
+
 ## Steps
 
 1. In Zapier, create a Zap.
@@ -20,4 +22,3 @@ This guide shows a simple flow:
 
 - Use `changes.fields` for price monitoring and numeric delta triggers.
 - For high-frequency schedules, keep `max_payload_bytes` reasonable to reduce webhook size.
-

@@ -2,16 +2,121 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/firasmosbehi/sentinel-webhook/schemas/webhook-payload.schema.json",
   "title": "Sentinel Webhook Payload",
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
-    "event_id": { "type": "string", "minLength": 1 },
-    "event": { "type": "string", "enum": ["CHANGE_DETECTED", "BASELINE_STORED"] },
-    "url": { "type": "string", "format": "uri" },
-    "selector": { "type": "string" },
-    "timestamp": { "type": "string", "format": "date-time" },
-    "payload_truncated": { "type": "boolean" },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "event": { "type": "string", "enum": ["CHANGE_DETECTED", "BASELINE_STORED"] },
+        "url": { "type": "string", "format": "uri" },
+        "selector": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "summary": { "type": "string" },
+        "payload_truncated": { "type": "boolean" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "changes": { "$ref": "#/$defs/changes" },
+        "previous": { "$ref": "#/$defs/snapshotRef" },
+        "current": { "$ref": "#/$defs/snapshotRef" }
+      },
+      "required": ["schema_version", "event_id", "event", "url", "timestamp", "current"],
+      "allOf": [
+        {
+          "if": { "properties": { "event": { "const": "CHANGE_DETECTED" } } },
+          "then": { "required": ["previous", "changes"] }
+        }
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "event": { "type": "string", "const": "NO_CHANGE" },
+        "url": { "type": "string", "format": "uri" },
+        "selector": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "previous": { "$ref": "#/$defs/snapshotRef" },
+        "current": { "$ref": "#/$defs/snapshotRef" }
+      },
+      "required": ["schema_version", "event_id", "event", "url", "timestamp", "previous", "current"]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "event": { "type": "string", "const": "FETCH_FAILED" },
+        "url": { "type": "string", "format": "uri" },
+        "selector": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "previous": { "$ref": "#/$defs/snapshotRef" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "message": { "type": "string" },
+            "statusCode": { "type": "integer" },
+            "attempts": { "type": "integer" },
+            "durationMs": { "type": "integer" }
+          },
+          "required": ["name", "message"]
+        }
+      },
+      "required": ["schema_version", "event_id", "event", "url", "timestamp", "error"]
+    }
+  ],
+  "$defs": {
+    "snapshotRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contentHash": { "type": "string" },
+        "fetchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["contentHash", "fetchedAt"]
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "store_name": { "type": "string" },
+        "key": { "type": "string" },
+        "content_type": { "type": "string" },
+        "bytes": { "type": "integer" }
+      },
+      "required": ["store_name", "key", "content_type", "bytes"]
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debug": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "previous_snapshot": { "$ref": "#/$defs/artifactRef" },
+            "current_snapshot": { "$ref": "#/$defs/artifactRef" }
+          }
+        },
+        "screenshots": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "before": { "$ref": "#/$defs/artifactRef" },
+            "after": { "$ref": "#/$defs/artifactRef" },
+            "scope": { "type": "string", "enum": ["full_page", "selector"] },
+            "selector": { "type": "string" }
+          }
+        }
+      }
+    },
     "changes": {
       "type": "object",
       "additionalProperties": false,
@@ -22,7 +127,9 @@
           "properties": {
             "old": { "type": "string" },
             "new": { "type": "string" },
-            "delta": { "type": "number" }
+            "delta": { "type": "number" },
+            "patch": { "type": "string" },
+            "patch_truncated": { "type": "boolean" }
           },
           "required": ["old", "new"]
         },
@@ -62,25 +169,6 @@
         }
       },
       "minProperties": 1
-    },
-    "previous": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "contentHash": { "type": "string" },
-        "fetchedAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["contentHash", "fetchedAt"]
-    },
-    "current": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "contentHash": { "type": "string" },
-        "fetchedAt": { "type": "string", "format": "date-time" }
-      },
-      "required": ["contentHash", "fetchedAt"]
     }
-  },
-  "required": ["schema_version", "event_id", "event", "url", "timestamp", "current"]
+  }
 }

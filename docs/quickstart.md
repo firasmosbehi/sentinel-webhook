@@ -17,10 +17,11 @@ Notes:
 
 ## Local Webhook Receiver
 
-Sentinel blocks `localhost` / private IPs for `webhook_url` (SSRF protection). To receive webhooks locally:
-1. Run the example receiver in `examples/express-receiver/`.
-2. Expose it via a public tunnel (e.g. ngrok).
-3. Use the tunnel `https://...` URL as `webhook_url`.
+By default, Sentinel blocks `localhost` / private IPs for `webhook_url` (SSRF protection).
+
+Options:
+1. Local development only: set `allow_localhost=true` and use a `http://127.0.0.1:PORT/...` webhook URL.
+2. Production/Apify: expose your receiver via a public tunnel (e.g. ngrok) or deploy it publicly, then use the public `https://...` URL as `webhook_url`.
 
 ## Apify Schedule (Production)
 
@@ -30,4 +31,3 @@ Sentinel blocks `localhost` / private IPs for `webhook_url` (SSRF protection). T
    - Default dataset (run events)
    - `history_dataset_name` (optional history)
    - `dead_letter_dataset_name` (failed deliveries)
-
